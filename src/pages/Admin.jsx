@@ -1,19 +1,34 @@
 import React, { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useStore, ROLES } from '../store';
+import { useStore, ROLES, roleNameOf } from '../store';
 import { Avatar, Badge, Btn, Card, Confirm, DataTable, FormFields, Icon, ListField, Modal, NoSections, PageHead, Popover, RecordModal, Tabs, Toggle, UserChip, firstAllowed } from '../ui';
 import DropdownOptions, { DealStages, PageNames } from './Options';
-import { downloadBlob, fmtDT, humanize, money, moneyK, sum } from '../util';
+import FormSetup from './FormSetup';
+import { AutoBackups, DuplicatesCard } from './Import';
+import { CurrencySettings, TaxSettings } from '../extras';
+import { MONTHS } from '../dateRange';
+import { downloadBlob, fmtDT, humanize, money, moneyK, priceListDiscount, sum } from '../util';
 
 export function Users() {
-  const { db, me, role, can, t, create, update, toast } = useStore();
+  const { db, me, role, can, scopeOf, t, create, update, toast } = useStore();
   const [edit, setEdit] = useState(null);
+  // A team always needs its leader, and only people with company-wide team access can move others between teams.
+  const teamRules = (v) => {
+    const was = db.users.find((u) => u.id === v.id);
+    if (!was) return {};
+    const leads = db.teams.find((x) => x.managerId === was.id);
+    if (leads && (v.teamId || null) !== leads.id) return { teamId: `${was.name} leads ${leads.name}. Give that team a new leader first.` };
+    if (leads && v.role !== 'manager') return { role: `${was.name} leads ${leads.name}. Give that team a new leader first.` };
+    if (scopeOf('teams') !== 'all' && (v.teamId || null) !== (was.teamId || null) && was.teamId && was.teamId !== me.teamId) return { teamId: 'Only an Admin can move someone out of another team.' };
+    return {};
+  };
   const fields = [
     { k: 'name', label: 'Full name', req: true },
     { k: 'email', label: 'Email', type: 'email', req: true },
     { k: 'title', label: 'Job title' },
     { k: 'phone', label: 'Phone', type: 'tel' },
     { k: 'role', label: 'Role', type: 'select', noBlank: true, options: Object.entries(ROLES).filter(([value]) => role === 'admin' || value !== 'admin').map(([value, label]) => ({ value, label })) },
+    { k: 'customRole', label: 'Custom role', type: 'select', hide: !(db.customRoles || []).length, blankLabel: 'None', options: (db.customRoles || []).map((x) => ({ value: x.id, label: x.name })), hint: 'Replaces the access of the role above. The menu layout stays the same.' },
     { k: 'teamId', label: 'Sales team', type: 'select', options: db.teams.map((t) => ({ value: t.id, label: t.name })) },
     { k: 'target', label: 'Annual target', type: 'number', min: 0 },
     { k: 'active', label: 'Status', type: 'check', text: 'Active user' },
@@ -32,14 +47,14 @@ export function Users() {
         columns={[
           { k: 'name', label: 'Name', render: (u) => <span className="row"><Avatar name={u.name} size={30} /><span><div className="strong">{u.name}</div><div className="small muted">{u.email}</div></span></span> },
           { k: 'title', label: 'Job title' },
-          { k: 'role', label: 'Role', value: (u) => ROLES[u.role], render: (u) => <Badge tone={u.role === 'admin' ? 'violet' : u.role === 'manager' ? 'info' : 'muted'} dot={false}>{ROLES[u.role]}</Badge> },
+          { k: 'role', label: 'Role', value: (u) => roleNameOf(db, u), render: (u) => <Badge tone={u.role === 'admin' ? 'violet' : u.role === 'manager' ? 'info' : 'muted'} dot={false}>{roleNameOf(db, u)}</Badge> },
           { k: 'team', label: 'Team', value: (u) => db.teams.find((t) => t.id === u.teamId)?.name || '—' },
           { k: 'open', label: 'Open deals', align: 'r', value: (u) => stat(u.id).open },
           { k: 'won', label: 'Won', align: 'r', value: (u) => stat(u.id).won, render: (u) => moneyK(stat(u.id).won) },
           { k: 'active', label: 'Status', value: (u) => (u.active ? 'Active' : 'Inactive'), render: (u) => <Badge>{u.active ? 'Active' : 'Inactive'}</Badge> },
           { k: 'access', label: 'Access', sort: false, stop: true, omit: !can('access'), value: (u) => Object.keys(db.permissions.users[u.id] || {}).length || '', render: (u) => { const n = Object.keys(db.permissions.users[u.id] || {}).length; return <Link className="btn sm" to={`/access?user=${u.id}`}>{n ? `Custom (${n})` : 'Role access'}</Link>; } },
         ]} />
-      {edit && <RecordModal size="lg" title={edit.id ? `Edit ${edit.name}` : 'New user'} fields={fields} initial={edit} onClose={() => setEdit(null)} onSave={(v) => {
+      {edit && <RecordModal size="lg" title={edit.id ? `Edit ${edit.name}` : 'New user'} fields={fields} initial={edit} check={teamRules} onClose={() => setEdit(null)} onSave={(v) => {
         if (v.id) {
           if (v.id === me.id && (!v.active || v.role !== 'admin')) { toast("You can't remove your own admin access."); return; }
           const { id, ...rest } = v; update('users', id, rest); toast('User saved');
@@ -51,24 +66,21 @@ export function Users() {
 
 export function AuditLog() {
   const { db, me, scopeOf, t, userName } = useStore();
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
   const teamIds = useMemo(() => new Set(db.users.filter((u) => u.teamId === me.teamId).map((u) => u.id)), [db.users, me.teamId]);
   const sc = scopeOf('audit');
-  const rows = db.audit.filter((a) => (sc === 'all' || (sc === 'team' ? teamIds.has(a.userId) || a.userId === me.id : a.userId === me.id)) && (!from || a.at.slice(0, 10) >= from) && (!to || a.at.slice(0, 10) <= to));
+  const rows = db.audit.filter((a) => (sc === 'all' || (sc === 'team' ? teamIds.has(a.userId) || a.userId === me.id : a.userId === me.id)));
   const entities = [...new Set(db.audit.map((a) => a.entity))].sort();
   const actions = [...new Set(db.audit.map((a) => a.action))].sort();
   const TONE = { Create: 'good', Update: 'info', Delete: 'bad', Transfer: 'violet', Request: 'warn', Reject: 'bad' };
   return (
     <div>
       <PageHead title={t('audit')} sub={{ all: 'Every change, by everyone', team: 'Changes made by your team', own: 'Changes you made' }[sc]} />
-      <DataTable rows={rows} exportName="audit-log" initialSort={{ k: 'at', dir: 'desc' }}
+      <DataTable rows={rows} exportName="audit-log" dateOf={(a) => a.at} initialSort={{ k: 'at', dir: 'desc' }}
         searchPlaceholder="Filter by user, record…"
         filters={[
           { k: 'action', label: 'Action', get: (a) => a.action, options: actions },
           { k: 'entity', label: 'Entity', get: (a) => a.entity, options: entities.map((e) => ({ value: e, label: humanize(e) })) },
         ]}
-        actions={<span className="row small"><label className="muted" htmlFor="af">From</label><input id="af" className="input" type="date" style={{ width: 142 }} value={from} onChange={(e) => setFrom(e.target.value)} /><label className="muted" htmlFor="at">To</label><input id="at" className="input" type="date" style={{ width: 142 }} value={to} onChange={(e) => setTo(e.target.value)} /></span>}
         columns={[
           { k: 'user', label: 'User', value: (a) => userName(a.userId), render: (a) => <UserChip id={a.userId} /> },
           { k: 'action', label: 'Action', render: (a) => <Badge tone={TONE[a.action]} dot={false}>{a.action}</Badge> },
@@ -85,11 +97,11 @@ export function AuditLog() {
   );
 }
 
-function Setting({ title, desc, k }) {
+function Setting({ title, desc, k, fallback }) {
   const { db, updateSettings } = useStore();
   return (
     <div className="row" style={{ alignItems: 'flex-start', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--line)' }}>
-      <Toggle on={db.settings[k]} label={title} onChange={(v) => updateSettings({ [k]: v })} />
+      <Toggle on={db.settings[k] ?? fallback} label={title} onChange={(v) => updateSettings({ [k]: v })} />
       <div className="grow"><div className="strong">{title}</div><div className="small muted">{desc}</div></div>
     </div>
   );
@@ -105,11 +117,12 @@ function General() {
             { k: 'companyName', label: 'Company name', req: true, full: true },
             { k: 'supportEmail', label: 'Support email', type: 'email', full: true },
             { k: 'businessNumber', label: 'Business phone number', full: true, hint: 'Demo only. No real calls use this number.' },
-            { k: 'currency', label: 'Currency', type: 'select', noBlank: true, list: 'currency', hint: 'Changes the symbol only. Amounts are not converted.' },
-            { k: 'timezone', label: 'Time zone', type: 'select', noBlank: true, list: 'timezone' },
-            { k: 'fiscalStart', label: 'Fiscal year starts', type: 'select', noBlank: true, list: 'fiscalStart' },
+            { k: 'currency', label: 'Main currency', type: 'select', noBlank: true, list: 'currency', hint: 'Reports total in this. Changing it changes the symbol only, and existing amounts are not converted.' },
+            { k: 'fiscalStart', label: 'Fiscal year starts', type: 'select', noBlank: true, options: MONTHS },
+            { k: 'locale', label: 'Number and date format', type: 'select', noBlank: true, list: 'locale' },
+            { k: 'weekStart', label: 'Week starts on', type: 'select', noBlank: true, options: ['Sunday', 'Monday', 'Saturday'] },
           ]} />
-          <div><Btn kind="primary" disabled={!v.companyName?.trim()} onClick={() => { updateSettings({ companyName: v.companyName, supportEmail: v.supportEmail, businessNumber: v.businessNumber, currency: v.currency, timezone: v.timezone, fiscalStart: v.fiscalStart }); toast('Settings saved'); }}>Save</Btn></div>
+          <div><Btn kind="primary" disabled={!v.companyName?.trim()} onClick={() => { updateSettings({ companyName: v.companyName, supportEmail: v.supportEmail, businessNumber: v.businessNumber, currency: v.currency, ...(v.currency !== db.settings.currency ? { fxRates: {} } : {}), fiscalStart: v.fiscalStart, locale: v.locale || 'en-US', weekStart: v.weekStart || 'Sunday' }); toast('Settings saved'); }}>Save</Btn></div>
         </div>
       </Card>
       <Roles />
@@ -124,35 +137,45 @@ function Roles() {
   );
 }
 function CrmSettings() {
-  const { db, updateSettings } = useStore();
+  const { db, updateSettings, optionsOf } = useStore();
   return (
     <div className="g2" style={{ alignItems: 'start' }}>
       <Card title="CRM">
         <Setting k="useLeads" title="Leads" desc="Add a qualification step before an opportunity is created." />
-        <Setting k="multiTeams" title="Multi teams" desc="Assign salespeople to more than one sales team." />
-        <Setting k="ruleAssignment" title="Rule-based assignment" desc="Assign new leads to salespeople automatically." />
-        <Setting k="recurring" title="Recurring revenues" desc="Track subscription and recurring plans on opportunities." />
-        <Setting k="visits" title="Visits to leads" desc="Link website visits to lead records." />
+        <Setting k="ruleAssignment" title="Rule-based assignment" desc="Leads from imports and generated leads go to the salesperson with the fewest new leads. Web form leads always do." />
+        <Setting k="requirePasswords" title="Require passwords at login" desc="Simulated sign-in. The demo password is demo1234. This doesn't secure the data, which stays readable in this browser." />
+      </Card>
+      <Card title="Assistant" sub="Simulated: fixed rules over your records, with no AI model">
+        <Setting k="aiAssistant" title="Ask the assistant" desc="A panel for asking questions about your records and adding tasks." />
+        <Setting k="aiDealScore" title="Win chance on deals" desc="A score on each open deal, with the reasons behind it." />
+        <Setting k="aiHealth" title="Customer health" desc="Healthy, Watch or At risk on each customer." />
+        <Setting k="aiWriter" title="Writing help" desc="Draft messages, make them shorter or more formal, and suggest replies." />
       </Card>
       <Card title="Lead generation">
         <Setting k="predictiveScoring" title="Predictive lead scoring" desc="Rank leads by how likely they are to convert." />
         <Setting k="leadMining" title="Lead mining" desc="Show the Generate leads button." />
-        <Setting k="partnerAutocomplete" title="Partner autocomplete" desc="Suggest company details when creating customers." />
-        <Setting k="emailGateway" title="Incoming email" desc="Create leads from emails sent to an alias. Needs a mail server connection." />
-        <div className="field" style={{ marginTop: 12 }}><label className="label">Assignment interval</label>
-          <ListField f={{ k: 'assignInterval', label: 'Assignment interval', type: 'select', noBlank: true, list: 'assignInterval', disabled: !db.settings.ruleAssignment }} value={db.settings.assignInterval} onChange={(_, x) => updateSettings({ assignInterval: x })} />
-        </div>
       </Card>
       <Card title="Workflow rules">
         <Setting k="requireLostReason" title="Require a lost reason" desc="Salespeople must pick a reason when they mark a deal as lost." />
         <Setting k="transferNeedsApproval" title="Transfers need manager approval" desc="If off, salespeople can transfer records directly." />
       </Card>
       <Card title="Commerce">
-        <Setting k="lowStockAlerts" title="Low stock alerts" desc="Flag products at or below their reorder level." />
+        <Setting k="opsReadOnly" fallback={true} title="Orders, billing, shipping and reordering are handled outside this CRM" desc="People can view quotes, orders, invoices, payments, shipments, stock and purchase orders, and notify others, but can't change them here." />
+        <Setting k="lowStockAlerts" title="Low stock alerts" desc="Admins get a bell alert when a product reaches its reorder level." />
         <Setting k="allowBackorder" title="Allow backorders" desc="Accept orders for more than the stock on hand." />
         <div className="form-grid" style={{ marginTop: 12 }}>
           <div className="field"><label className="label">Invoice prefix</label><input className="input" defaultValue={db.settings.invoicePrefix} onBlur={(e) => updateSettings({ invoicePrefix: e.target.value })} /></div>
-          <div className="field"><label className="label">Tax rate %</label><input className="input" type="number" min="0" defaultValue={db.settings.taxRate} onBlur={(e) => updateSettings({ taxRate: Math.max(0, Number(e.target.value) || 0) })} /></div>
+          <div className="field"><label className="label">Default payment terms</label><ListField f={{ k: 'defaultTerms', label: 'Payment terms', type: 'select', noBlank: true, list: 'paymentTerms' }} value={db.settings.defaultTerms} onChange={(_, x) => updateSettings({ defaultTerms: x })} /></div>
+        </div>
+      </Card>
+      <Card title="Discounts and purchasing">
+        <div className="form-grid">
+          <div className="field"><label className="label" htmlFor="set-maxd">Most a salesperson can discount (%)</label><input id="set-maxd" className="input" type="number" min="0" max="100" defaultValue={db.settings.maxDiscount ?? 20} onBlur={(e) => updateSettings({ maxDiscount: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} /></div>
+          {db.settings.opsReadOnly === false && <div className="field"><label className="label" htmlFor="set-pol">Purchase orders above this need approval</label><input id="set-pol" className="input" type="number" min="0" defaultValue={db.settings.poApprovalLimit ?? 5000} onBlur={(e) => updateSettings({ poApprovalLimit: Math.max(0, Number(e.target.value) || 0) })} /></div>}
+        </div>
+        <div className="label" style={{ margin: '14px 0 6px' }}>Discount for each price list (%)</div>
+        <div className="form-grid">
+          {optionsOf('priceList').map((name) => <div className="field" key={name}><label className="label" htmlFor={`set-pl-${name}`}>{name}</label><input id={`set-pl-${name}`} className="input" type="number" min="0" max="100" defaultValue={priceListDiscount(db.settings, name)} onBlur={(e) => updateSettings({ priceLists: { ...(db.settings.priceLists ?? { Partner: 10, Enterprise: 15 }), [name]: Math.min(100, Math.max(0, Number(e.target.value) || 0)) } })} /></div>)}
         </div>
       </Card>
     </div>
@@ -211,9 +234,9 @@ function LostReasons() {
 const INTEGRATIONS = [
   { title: 'Phone calls', icon: 'Phone', setting: 'voiceEnabled', now: 'Simulated only: outgoing calls from a demo business number, customers calling back, ringing the owner, then the manager, then the Admin, and missed-call follow-ups. No real calls are made.', needs: 'Real calls need a telephony provider and a server.', options: 'Twilio, Exotel, Knowlarity, Plivo' },
   { title: 'Video calls', icon: 'Video', setting: 'videoEnabled', now: 'Demo call screen with your real camera preview, and call logging.', needs: 'Connecting two people needs a video service and a server.', options: 'Zoom, Google Meet, Daily, Agora' },
-  { title: 'WhatsApp', icon: 'MessageCircle', setting: 'whatsappEnabled', now: 'Click to chat: opens WhatsApp with the message ready, and logs it here.', needs: 'Receiving replies and sending automatically needs WhatsApp Business API approval and a server.', options: 'Meta Cloud API, Gupshup, Twilio, Interakt' },
+  { title: 'WhatsApp', icon: 'MessageCircle', setting: 'whatsappEnabled', now: 'Simulated: messages show delivered and read, customers may reply, plus templates and broadcasts. A button also opens the real WhatsApp.', needs: 'Receiving replies and sending automatically needs WhatsApp Business API approval and a server.', options: 'Meta Cloud API, Gupshup, Twilio, Interakt' },
   { title: 'SMS', icon: 'Smartphone', needs: 'Needs an SMS provider and a server.', options: 'Twilio, MSG91, Plivo' },
-  { title: 'Email', icon: 'Mail', needs: 'Needs Gmail or Outlook sign-in through a server.', options: 'Gmail, Outlook, SendGrid' },
+  { title: 'Email', icon: 'Mail', now: 'Simulated: inbox, tracking, scheduling and bulk email, with nothing actually sent.', needs: 'Needs Gmail or Outlook sign-in through a server.', options: 'Gmail, Outlook, SendGrid' },
   { title: 'Other messaging', icon: 'Send', needs: 'Each needs its own business account and a server.', options: 'Telegram, Facebook Messenger, Instagram' },
 ];
 function Integrations() {
@@ -259,7 +282,8 @@ function DeleteCompany({ onClose }) {
   );
 }
 function DataTab() {
-  const { db, can, orgs, resetDemo, isSampleOrg } = useStore();
+  const { db, can, orgs, resetDemo, isSampleOrg, restoreBackup, toast } = useStore();
+  const [restoring, setRestoring] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [confirm, setConfirm] = useState(false);
   return (
@@ -267,6 +291,12 @@ function DataTab() {
       <Card title="Backup" sub="Download this company's data as a JSON file">
         <Btn icon="Download" onClick={() => downloadBlob(new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' }), 'unifiedtree-crm-backup.json')}>Download backup</Btn>
       </Card>
+      <Card title="Restore" sub="Replace this company's data with a backup file">
+        <input type="file" className="input" accept=".json,application/json" aria-label="Backup file" onChange={(e) => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const data = JSON.parse(String(r.result)); if (!Array.isArray(data.users) || !data.settings) throw new Error('bad'); setRestoring(data); } catch { toast("That file isn't a CRM backup."); } }; r.readAsText(f); e.target.value = ''; }} />
+      </Card>
+      <AutoBackups />
+      <DuplicatesCard />
+      {restoring && <Confirm title="Replace this company's data?" text={`Everything in ${db.settings.companyName} will be replaced by the backup. This can't be undone, so download a backup first if you might need the current data.`} confirmLabel="Restore" onClose={() => setRestoring(null)} onConfirm={() => { restoreBackup(restoring); toast('Backup restored'); }} />}
       <Card title="Demo data" sub="Data is stored in this browser only">
         <Btn kind="danger" icon="RotateCcw" onClick={() => setConfirm(true)}>{isSampleOrg ? 'Reset to sample data' : 'Clear company data'}</Btn>
       </Card>
@@ -281,9 +311,9 @@ function DataTab() {
   );
 }
 export function SettingsPage() {
-  const { t, can, sec } = useStore();
+  const { db, t, can, sec } = useStore();
   const [pref, setTab] = useState('crm');
-  const settingTabs = [{ k: 'crm', label: 'CRM settings', icon: 'SlidersHorizontal' }, { k: 'options', label: 'Dropdown options', icon: 'ListPlus' }, { k: 'stages', label: 'Deal stages', icon: 'Kanban' }, { k: 'names', label: 'Page & menu names', icon: 'Type' }, { k: 'general', label: 'General & roles', icon: 'Building' }, { k: 'types', label: 'Activity types', icon: 'ListChecks' }, { k: 'lost', label: 'Lost reasons', icon: 'ThumbsDown' }, { k: 'integrations', label: 'Integrations', icon: 'Plug' }, { k: 'data', label: 'Data', icon: 'Database' }].filter((x) => sec('settings', x.k));
+  const settingTabs = [{ k: 'crm', label: 'CRM settings', icon: 'SlidersHorizontal' }, { k: 'options', label: 'Dropdown options', icon: 'ListPlus' }, { k: 'stages', label: 'Deal stages', icon: 'Kanban' }, { k: 'names', label: 'Page & menu names', icon: 'Type' }, { k: 'forms', label: 'Form fields', icon: 'FormInput' }, { k: 'gst', label: 'Tax', icon: 'Percent' }, { k: 'fx', label: 'Currencies', icon: 'Coins' }, { k: 'general', label: 'General & roles', icon: 'Building' }, { k: 'types', label: 'Activity types', icon: 'ListChecks' }, { k: 'lost', label: 'Lost reasons', icon: 'ThumbsDown' }, { k: 'integrations', label: 'Integrations', icon: 'Plug' }, { k: 'data', label: 'Data', icon: 'Database' }].filter((x) => sec('settings', x.k));
   const tab = firstAllowed(settingTabs, pref);
   return (
     <div>
@@ -295,6 +325,9 @@ export function SettingsPage() {
       {tab === 'options' && <DropdownOptions />}
       {tab === 'stages' && <DealStages />}
       {tab === 'names' && <PageNames />}
+      {tab === 'forms' && <FormSetup />}
+      {tab === 'gst' && <TaxSettings />}
+      {tab === 'fx' && <CurrencySettings key={db.settings.currency} />}
       {tab === 'general' && <General />}
       {tab === 'types' && <ActivityTypes />}
       {tab === 'lost' && <LostReasons />}

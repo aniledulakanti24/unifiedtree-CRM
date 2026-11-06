@@ -1,337 +1,270 @@
-import React, { useMemo, useState } from 'react';
+import { getLocale } from '../util';
+import React, { useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { Search } from 'lucide-react';
 import { useStore } from '../store';
-import { STAGES } from '../seed';
-import { Avatar, Badge, Btn, Card, Empty, Icon, Kpi, PageHead, Progress, UserChip } from '../ui';
-import { Bars, Trend } from '../charts';
+import { DrillCtx } from '../charts';
+import { RecordsDrawer, printPage } from '../drill';
+import { DateRange, useDateRange } from '../dateRange';
+import { GettingStarted } from '../ease';
+import { Badge, Btn, Card, Confirm, Empty, Icon, Modal, PageHead, Pills, Stat } from '../ui';
 import { RecordQuickCreate } from '../shared';
-import { CHANNELS, useComms } from '../comms';
-import { addDays, fmtDate, fmtShort, fmtTime, lastMonths, money, moneyK, monthKey, monthLabel, num, pct, relTime, sum, today } from '../util';
+import { uid } from '../util';
+import { BOARD_TEMPLATES, DEFAULTS, DRILLS, GROUPS, WIDGETS, buildContext, familyOf, typeLabel, widgetOf } from '../widgets';
 
-const stageName = (id) => STAGES.find((s) => s.id === id)?.name;
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
-const dateLine = () => new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-const thisYear = () => String(new Date().getFullYear());
-const wonIn = (deals, prefix) => deals.filter((d) => d.status === 'won' && (d.closeDate || '').startsWith(prefix));
-const SeeAll = ({ to, children = 'View all' }) => { const { canRoute } = useStore(); return canRoute(to) ? <Link className="small" to={to}>{children}</Link> : null; };
-const HeadLink = ({ to, primary, icon, children }) => { const { canRoute } = useStore(); return canRoute(to) ? <Link className={`btn ${primary ? 'primary' : ''}`} to={to}><Icon name={icon} />{children}</Link> : null; };
+const dateLine = () => new Date().toLocaleDateString(getLocale(), { weekday: 'long', month: 'long', day: 'numeric' });
+const SIZES = [{ value: 's', label: 'Small' }, { value: 'm', label: 'Medium' }, { value: 'l', label: 'Large' }, { value: 'f', label: 'Full width' }];
+const fresh = (k) => ({ id: uid('w'), k });
+const COLUMNS = { s: 3, m: 4, l: 6, f: 12 };
+// The last widget in a row grows to fill it, so any mix of sizes leaves no blank space.
+const fitRows = (sizes) => {
+  const spans = sizes.map((s) => COLUMNS[s]);
+  let used = 0;
+  spans.forEach((span, i) => {
+    if (used + span > 12) { spans[i - 1] += 12 - used; used = 0; }
+    used = (used + span) % 12;
+  });
+  if (used) spans[spans.length - 1] += 12 - used;
+  return spans;
+};
 
-/* ---------- Sales Person: what do I do today? ---------- */
-// Shown on every role's home screen. Only meetings you're in, even for people who can see everyone's.
-function TodayMeetings() {
-  const { db, me, can, sec, userName } = useStore();
-  if (!sec('dashboard', 'todayMeetings')) return null;
-  const now = new Date();
-  const list = db.events.filter((e) => (e.ownerId === me.id || e.attendeeIds?.includes(me.id)) && e.category !== 'Holiday' && new Date(e.start).toDateString() === now.toDateString() && new Date(e.end) > now).sort((a, b) => a.start.localeCompare(b.start));
-  const waiting = can('meetings') ? db.meetingRequests.filter((r) => r.status === 'Pending' && r.toId === me.id).length : 0;
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <Card title="Today's meetings" action={can('meetings', 'create') ? <Link className="small" to="/meetings?new=1">Request a meeting</Link> : null}>
-        {waiting > 0 && <p className="notice" style={{ margin: '0 0 10px' }}>{waiting === 1 ? '1 meeting request needs' : `${waiting} meeting requests need`} your answer. <Link to="/meetings">Review</Link></p>}
-        {!list.length && <div className="sub">No more meetings today.</div>}
-        {list.map((e) => {
-          const others = [e.ownerId, ...(e.attendeeIds || [])].filter((u) => u !== me.id).map((u) => userName(u));
-          return (
-            <div key={e.id} className="dashlet">
-              <div className="strong num" style={{ width: 66, flexShrink: 0 }}>{fmtTime(e.start)}</div>
-              <div className="grow" style={{ minWidth: 0 }}>
-                <div className="trunc strong"><Link to={e.requestId ? `/meetings?open=${e.requestId}` : '/calendar'}>{e.title}</Link></div>
-                <div className="small muted trunc">{[others.length ? `With ${others.join(', ')}` : '', e.location].filter(Boolean).join(' · ')}</div>
-              </div>
-            </div>
-          );
-        })}
-      </Card>
-    </div>
-  );
+// One broken widget shows a small message and leaves the rest of the dashboard working.
+class WidgetGuard extends React.Component {
+  constructor(props) { super(props); this.state = { failed: false }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    if (this.state.failed) return <Card title={this.props.title}><Empty icon="TriangleAlert" text="This widget couldn't load." /></Card>;
+    return this.props.children;
+  }
 }
 
-function FollowupsCard() {
-  const { db, me, can, sec, scope, t } = useStore();
-  const { startCall, canCall, inCall } = useComms();
-  if (!can('followups') || !sec('dashboard', 'followupsCard')) return null;
-  const dayEnd = new Date(); dayEnd.setHours(23, 59, 59, 999);
-  const list = scope(db.followups).filter((f) => f.status === 'open' && f.at <= dayEnd.toISOString()).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 5);
+function Tile({ w, ctx, onDrill }) {
+  const x = w.fn(ctx);
+  return <Stat label={w.title} icon={w.icon} {...x} onClick={DRILLS[w.k] ? () => onDrill(w) : undefined} />;
+}
+
+// Redrawn only when its own settings or the data change, so moving one widget stays quick with many on screen.
+const Widget = React.memo(({ item, w, ctx, setCfg, choices, onChoose, onDrill }) => {
+  const { canRoute } = useStore();
+  if (w.type === 'section') return <h2 className="wd-section">{w.title}</h2>;
+  if (w.type === 'tile') return <Tile w={w} ctx={ctx} onDrill={onDrill} />;
+  if (w.bare) return <w.C ctx={ctx} />;
+  const link = w.to && canRoute(w.to) ? <Link className="small nowrap" to={w.to}>View all</Link> : null;
   return (
-    <Card title="Follow-ups today" action={<SeeAll to="/followups">{t('followups')}</SeeAll>}>
-      {!list.length && <Empty icon="BellOff" text="No follow-ups due." />}
-      {list.map((f) => (
-        <div key={f.id} className="dashlet">
-          <span className="kpi-ico" style={{ width: 28, height: 28 }}><Icon name={CHANNELS[f.channel]} size={14} /></span>
-          <div className="grow"><div className="strong trunc">{f.title}</div><div className="small muted trunc">{f.name} · {fmtTime(f.at)}</div></div>
-          {f.channel === 'Call' && f.phone && canCall && <Btn sm icon="Phone" aria-label={`Call ${f.name}`} disabled={inCall} onClick={() => startCall('voice', { name: f.name, phone: f.phone, relatedType: f.relatedType, relatedId: f.relatedId, contactId: f.contactId })} />}
-        </div>
-      ))}
+    <Card title={choices.length > 1
+      ? <span className="wd-pick-wrap"><span className="nowrap">{w.title}</span><Icon name="ChevronDown" size={14} color="var(--ink-3)" style={{ flexShrink: 0 }} /><select className="wd-pick" aria-label={`What this chart shows: ${w.title}`} value={w.k} onChange={(e) => onChoose(e.target.value)}>{choices.map((x) => <option key={x.k} value={x.k}>{x.title}</option>)}</select></span>
+      : item.cfg?.name || w.title} sub={w.sub} action={link} pad={w.pad !== false}>
+      <DrillCtx.Provider value={DRILLS[w.k]?.key ? (label) => onDrill(w, label) : null}>
+        {w.Explorer ? <w.Explorer cfg={item.cfg} setCfg={setCfg} range={ctx.range} /> : <w.C ctx={ctx} />}
+      </DrillCtx.Provider>
     </Card>
   );
+}, (a, b) => a.ctx === b.ctx && a.item.id === b.item.id && a.item.k === b.item.k && a.item.cfg === b.item.cfg && a.choices.map((x) => x.k).join() === b.choices.map((x) => x.k).join());
+
+function NewBoard({ onCreate, onClose }) {
+  const [name, setName] = useState('');
+  const [from, setFrom] = useState('sales');
+  return (
+    <Modal size="sm" title="New dashboard" onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" disabled={!name.trim()} onClick={() => onCreate(name.trim(), from)}>Create</Btn></>}>
+      <div className="stack">
+        <div className="field"><label className="label" htmlFor="board-name">Name</label><input id="board-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="For example, Monthly review" /></div>
+        <div className="field"><label className="label" htmlFor="board-from">Start from</label><select id="board-from" className="select" value={from} onChange={(e) => setFrom(e.target.value)}>{Object.entries(BOARD_TEMPLATES).map(([k, x]) => <option key={k} value={k}>{x.label}</option>)}</select></div>
+      </div>
+    </Modal>
+  );
 }
 
-function SalesDashboard() {
-  const { db, me, can, sec, scope, update, toast, companyName, t } = useStore();
-  const [quick, setQuick] = useState(null);
-  const deals = useMemo(() => scope(db.deals), [db.deals, me.id]);
-  const open = deals.filter((d) => d.status === 'open');
-  const tasks = scope(db.activities).filter((a) => a.status !== 'done').sort((a, b) => a.due.localeCompare(b.due));
-  const now = today();
-  const dueNow = tasks.filter((a) => a.due <= now);
-  const focus = (dueNow.length ? dueNow : tasks).slice(0, 7);
-  const wonMonth = sum(wonIn(deals, now.slice(0, 7)), (d) => d.value);
-  const wonYear = sum(wonIn(deals, thisYear()), (d) => d.value);
-  const closing = open.filter((d) => d.closeDate <= addDays(30)).sort((a, b) => a.closeDate.localeCompare(b.closeDate)).slice(0, 6);
-  const leads = scope(db.leads).filter((l) => l.status === 'New').sort((a, b) => b.score - a.score).slice(0, 5);
-  const iso = new Date().toISOString();
-  const meetings = scope(db.events).filter((e) => e.start >= iso).sort((a, b) => a.start.localeCompare(b.start)).slice(0, 4);
-  const transfers = db.transfers.filter((x) => x.status === 'Pending' && x.requestedBy === me.id);
-  const byStage = STAGES.filter((s) => s.id !== 'won').map((s) => ({ label: s.name, Value: sum(open.filter((d) => d.stage === s.id), (d) => d.value) }));
-  const attain = me.target ? (wonYear / me.target) * 100 : 0;
+function ShareBoard({ board, onSave, onClose }) {
+  const [roles, setRoles] = useState(board.roles || []);
+  const opts = [['admin', 'Admins'], ['manager', 'Managers'], ['sales', 'Sales people']];
   return (
-    <div>
-      <PageHead title={`${greeting()}, ${me.name.split(' ')[0]}`} sub={`${dateLine()} · ${dueNow.length ? `${dueNow.length} activities need you today` : 'Nothing overdue'}`}>
-        {can('leads', 'create') && <Btn icon="Magnet" onClick={() => setQuick('lead')}>New lead</Btn>}
-        {can('pipeline', 'create') && <Btn kind="primary" icon="Plus" onClick={() => setQuick('deal')}>New opportunity</Btn>}
-      </PageHead>
-      <TodayMeetings />
-      {sec('dashboard', 'kpis') && <div className="g4" style={{ marginBottom: 14 }}>
-        <Kpi label="Due today or overdue" value={num(dueNow.length)} note={`${tasks.length} open in total`} icon="AlarmClock" />
-        <Kpi label="My open pipeline" value={moneyK(sum(open, (d) => d.value))} note={`${open.length} opportunities`} icon="Kanban" />
-        <Kpi label="Won this month" value={moneyK(wonMonth)} icon="Trophy" />
-        <Kpi label="Annual target" value={pct(attain)} note={`${moneyK(wonYear)} of ${moneyK(me.target)}`} icon="Target" />
-      </div>}
-      <div className="g-21" style={{ alignItems: 'start' }}>
-        <div className="stack">
-          {sec('dashboard', 'focus') && <Card title="Today's focus" sub={dueNow.length ? 'Overdue first' : 'Coming up next'} action={<SeeAll to="/tasks">{t('tasks')}</SeeAll>}>
-            {!focus.length && <Empty icon="CheckCheck" text="You're all caught up." />}
-            {focus.map((a) => {
-              const type = db.activityTypes.find((x) => x.id === a.typeId);
-              const late = a.due < now;
-              return (
-                <div key={a.id} className="dashlet">
-                  <input type="checkbox" aria-label={`Complete ${a.summary}`} disabled={!can('tasks', 'edit')} onChange={() => { update('activities', a.id, { status: 'done' }); toast('Activity done'); }} style={{ accentColor: 'var(--brand)', width: 16, height: 16 }} />
-                  <span className="kpi-ico" style={{ width: 28, height: 28 }}><Icon name={type?.icon} size={14} /></span>
-                  <div className="grow"><div className="strong trunc">{a.summary}</div>{a.relatedType === 'deal' ? <Link className="small trunc" style={{ display: 'block' }} to={`/pipeline/${a.relatedId}`}>{a.relatedLabel}</Link> : <div className="small muted trunc">{a.relatedLabel || type?.name}</div>}</div>
-                  <span className="small nowrap" style={{ color: late ? 'var(--bad)' : 'var(--ink-3)' }}>{late ? 'Overdue · ' : ''}{fmtShort(a.due)}</span>
+    <Modal size="sm" title={`Share ${board.name}`} onClose={onClose} footer={<><Btn onClick={onClose}>Cancel</Btn><Btn kind="primary" onClick={() => onSave(roles)}>Save</Btn></>}>
+      <div className="stack-s">
+        {opts.map(([k, l]) => <label key={k} className="check"><input type="checkbox" checked={roles.includes(k)} onChange={() => setRoles((p) => (p.includes(k) ? p.filter((x) => x !== k) : [...p, k]))} />{l}</label>)}
+        <p className="small muted" style={{ margin: '6px 0 0' }}>They see the same layout, filled with only the records they're allowed to see. Only you can change it.</p>
+      </div>
+    </Modal>
+  );
+}
+
+function AddWidgets({ items, available, onAdd, onRemove, onClose }) {
+  const [group, setGroup] = useState('All');
+  const [q, setQ] = useState('');
+  const groups = ['All', ...GROUPS.filter((g) => available.some((w) => w.group === g))];
+  const shown = available.filter((w) => (group === 'All' || w.group === group) && `${w.title} ${w.sub || ''}`.toLowerCase().includes(q.toLowerCase()));
+  return (
+    <Modal size="lg" title="Add widgets" onClose={onClose} footer={<Btn kind="primary" onClick={onClose}>Done</Btn>}>
+      <div className="stack-s">
+        <div className="row wrap between">
+          <div className="tb-search grow"><Search size={15} /><input className="input" aria-label="Search widgets" placeholder={`Search ${available.length} widgets…`} value={q} onChange={(e) => setQ(e.target.value)} /></div>
+          <span className="small muted">{items.length} on your dashboard</span>
+        </div>
+        <Pills value={group} onChange={setGroup} options={groups} />
+        <div className="wd-lib">
+          {shown.map((w) => {
+            const placed = items.filter((x) => x.k === w.k);
+            const on = placed.length > 0;
+            return (
+              <div key={w.k} className={`wd-lib-item ${on ? 'on' : ''}`}>
+                <span className="kpi-ico"><Icon name={w.icon} size={16} /></span>
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div className="strong trunc">{w.title}</div>
+                  <div className="small muted trunc">{typeLabel(w)}{w.sub ? ` · ${w.sub}` : ''}</div>
                 </div>
-              );
-            })}
-          </Card>}
-          <FollowupsCard />
-          {sec('dashboard', 'closing') && <Card title="Closing in the next 30 days" action={<SeeAll to="/pipeline">{t('pipeline')}</SeeAll>} pad={false}>
-            <div style={{ marginTop: 10 }}>
-              {!closing.length && <Empty icon="Handshake" text="No deals closing soon." />}
-              {closing.length > 0 && (
-                <div className="tb-wrap"><table className="table"><thead><tr><th>Opportunity</th><th>Stage</th><th>Closing</th><th className="r">Value</th></tr></thead><tbody>
-                  {closing.map((d) => <tr key={d.id}><td><Link className="strong" to={`/pipeline/${d.id}`}>{d.title}</Link><div className="small muted">{companyName(d.companyId)}</div></td><td><Badge>{stageName(d.stage)}</Badge></td><td className="nowrap" style={d.closeDate < now ? { color: 'var(--bad)' } : undefined}>{fmtShort(d.closeDate)}</td><td className="r num strong">{money(d.value)}</td></tr>)}
-                </tbody></table></div>
-              )}
-            </div>
-          </Card>}
-          {sec('dashboard', 'stageChart') && <Card title="My pipeline by stage"><Bars horizontal height={190} data={byStage} series={[{ key: 'Value', name: 'Pipeline value' }]} /></Card>}
-        </div>
-        <div className="stack">
-          {can('calendar') && sec('dashboard', 'appointments') && <Card title="Next appointments" action={<SeeAll to="/calendar">{t('calendar')}</SeeAll>}>
-            {!meetings.length && <Empty icon="CalendarOff" text="Nothing scheduled." />}
-            {meetings.map((e) => (
-              <div key={e.id} className="dashlet">
-                <div style={{ width: 38, textAlign: 'center', flexShrink: 0 }}><div className="small muted">{new Date(e.start).toLocaleDateString('en-US', { month: 'short' })}</div><div className="strong num" style={{ fontSize: 16, lineHeight: 1.1 }}>{new Date(e.start).getDate()}</div></div>
-                <div className="grow"><div className="trunc strong">{e.title}</div><div className="small muted">{fmtTime(e.start)} · {e.location}</div></div>
+                {w.multi && on && <Badge tone="muted" dot={false}>{placed.length}</Badge>}
+                {on && !w.multi
+                  ? <Btn sm icon="Check" aria-label={`Remove ${w.title}`} onClick={() => onRemove(placed[0].id)}>Added</Btn>
+                  : <Btn sm icon="Plus" aria-label={`Add ${w.title}`} onClick={() => onAdd(w.k)}>Add</Btn>}
               </div>
-            ))}
-          </Card>}
-          {can('leads') && sec('dashboard', 'leadsCard') && <Card title="Leads to contact" sub="Highest score first" action={<SeeAll to="/leads">{t('leads')}</SeeAll>}>
-            {!leads.length && <Empty icon="Magnet" text="No new leads." />}
-            {leads.map((l) => (
-              <Link key={l.id} to={`/leads?open=${l.id}`} className="dashlet" style={{ color: 'inherit', textDecoration: 'none' }}>
-                <Avatar name={l.name} size={28} />
-                <div className="grow"><div className="trunc strong">{l.name}</div><div className="small muted trunc">{l.company}</div></div>
-                <Badge tone="muted" dot={false}>{l.score}</Badge>
-              </Link>
-            ))}
-          </Card>}
-          {can('transfers') && sec('dashboard', 'transfersCard') && transfers.length > 0 && (
-            <Card title="Waiting on my manager" action={<SeeAll to="/transfers">{t('transfers')}</SeeAll>}>
-              {transfers.map((x) => <div key={x.id} className="dashlet"><div className="grow trunc">{x.recordLabel}</div><Badge>{x.status}</Badge></div>)}
-            </Card>
-          )}
+            );
+          })}
+          {!shown.length && <Empty icon="Search" text="No widget matches that." />}
         </div>
       </div>
-      {quick && <RecordQuickCreate kind={quick} onClose={() => setQuick(null)} />}
-    </div>
-  );
-}
-
-/* ---------- Manager: how is my team doing, and what needs me? ---------- */
-function ManagerDashboard() {
-  const { db, me, can, sec, scope, decideTransfer, toast, userName, companyName, t } = useStore();
-  const team = db.teams.find((x) => x.id === me.teamId);
-  const members = db.users.filter((u) => u.teamId === me.teamId && u.active);
-  const deals = useMemo(() => scope(db.deals), [db.deals, me.id]);
-  const open = deals.filter((d) => d.status === 'open');
-  const activities = scope(db.activities);
-  const now = today();
-  const wonYear = sum(wonIn(deals, thisYear()), (d) => d.value);
-  const attain = team?.target ? (wonYear / team.target) * 100 : 0;
-  const approvals = !can('transfers', 'approve') ? [] : db.transfers.filter((x) => x.status === 'Pending' && members.some((u) => u.id === x.fromId));
-  const months = lastMonths(12);
-  const scorecard = members.map((u) => {
-    const mine = deals.filter((d) => d.ownerId === u.id);
-    const won = sum(wonIn(mine, thisYear()), (d) => d.value);
-    const closed = mine.filter((d) => d.status !== 'open');
-    return { u, open: mine.filter((d) => d.status === 'open').length, pipeline: sum(mine.filter((d) => d.status === 'open'), (d) => d.value), won, attain: u.target ? (won / u.target) * 100 : 0, winRate: closed.length ? (closed.filter((d) => d.status === 'won').length / closed.length) * 100 : 0, overdue: activities.filter((a) => a.ownerId === u.id && a.status !== 'done' && a.due < now).length };
-  }).sort((a, b) => b.won - a.won);
-  const planned = new Set(activities.filter((a) => a.status !== 'done').map((a) => a.relatedId));
-  const risk = open.map((d) => ({ d, why: d.closeDate < now ? 'Past closing date' : !planned.has(d.id) ? 'No next activity' : null })).filter((x) => x.why).sort((a, b) => b.d.value - a.d.value).slice(0, 6);
-  const waiting = scope(db.leads).filter((l) => l.status === 'New').length;
-  return (
-    <div>
-      <PageHead title={team?.name || t('dashboard')} sub={`${dateLine()} · ${members.length} people on your team`}>
-        <HeadLink to="/reports/forecast" icon="TrendingUp">{t('forecast')}</HeadLink>
-        <HeadLink primary to="/pipeline" icon="Kanban">{t('pipeline')}</HeadLink>
-      </PageHead>
-      <TodayMeetings />
-      {sec('dashboard', 'kpis') && <div className="g4" style={{ marginBottom: 14 }}>
-        <Kpi label="Team target" value={pct(attain)} note={`${moneyK(wonYear)} of ${moneyK(team?.target)}`} icon="Target" />
-        <Kpi label="Team pipeline" value={moneyK(sum(open, (d) => d.value))} note={`${open.length} open deals`} icon="Kanban" />
-        <Kpi label="Weighted forecast" value={moneyK(sum(open, (d) => (d.value * d.probability) / 100))} note="Value × probability" icon="Scale" />
-        <Kpi label="Waiting for you" value={num(approvals.length)} note="Transfer approvals" icon="Hourglass" />
-      </div>}
-      <div className="g-21" style={{ alignItems: 'start', marginBottom: 14 }}>
-        {sec('dashboard', 'scorecard') && <Card title="Rep scorecard" sub="This year" pad={false} action={<SeeAll to="/teams">{t('teams')}</SeeAll>}>
-          <div className="tb-wrap" style={{ marginTop: 10 }}>
-            <table className="table">
-              <thead><tr><th>Salesperson</th><th className="r">Open</th><th className="r">Pipeline</th><th className="r">Won</th><th style={{ width: 130 }}>Target</th><th className="r">Win rate</th><th className="r">Overdue</th></tr></thead>
-              <tbody>{scorecard.map((r) => (
-                <tr key={r.u.id}>
-                  <td><UserChip id={r.u.id} /></td>
-                  <td className="r num">{r.open}</td>
-                  <td className="r num">{moneyK(r.pipeline)}</td>
-                  <td className="r num strong">{moneyK(r.won)}</td>
-                  <td><div className="row"><div className="grow"><Progress value={r.attain} /></div><span className="small num">{pct(r.attain)}</span></div></td>
-                  <td className="r num">{pct(r.winRate)}</td>
-                  <td className="r num" style={r.overdue ? { color: 'var(--bad)', fontWeight: 600 } : undefined}>{r.overdue}</td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>
-        </Card>}
-        {sec('dashboard', 'approvals') && <Card title="Approvals" action={<SeeAll to="/transfers">{t('transfers')}</SeeAll>}>
-          {!approvals.length && <Empty icon="CheckCheck" text="No transfers waiting." />}
-          {approvals.slice(0, 4).map((x) => (
-            <div key={x.id} className="stack-s" style={{ padding: '10px 0', borderBottom: '1px solid var(--line)' }}>
-              <div><div className="strong trunc">{x.recordLabel}</div><div className="small muted trunc">{userName(x.fromId)} → {userName(x.toId)}</div><div className="small sub">{x.reason}</div></div>
-              <div className="row"><Btn sm kind="primary" onClick={() => { decideTransfer(x.id, true, 'Approved from dashboard'); toast('Transfer approved. Ownership moved.'); }}>Approve</Btn><Btn sm onClick={() => { decideTransfer(x.id, false, 'Rejected from dashboard'); toast('Transfer rejected'); }}>Reject</Btn></div>
-            </div>
-          ))}
-        </Card>}
-      </div>
-      <div className="g-21" style={{ alignItems: 'start' }}>
-        {sec('dashboard', 'risk') && <Card title="Deals at risk" sub="Largest first" pad={false}>
-          <div style={{ marginTop: 10 }}>
-            {!risk.length && <Empty icon="ShieldCheck" text="No deals at risk." />}
-            {risk.length > 0 && (
-              <div className="tb-wrap"><table className="table"><thead><tr><th>Opportunity</th><th>Owner</th><th>Risk</th><th className="r">Value</th></tr></thead><tbody>
-                {risk.map(({ d, why }) => <tr key={d.id}><td><Link className="strong" to={`/pipeline/${d.id}`}>{d.title}</Link><div className="small muted">{companyName(d.companyId)} · closes {fmtDate(d.closeDate)}</div></td><td><UserChip id={d.ownerId} /></td><td><Badge tone={d.closeDate < now ? 'bad' : 'warn'}>{why}</Badge></td><td className="r num strong">{money(d.value)}</td></tr>)}
-              </tbody></table></div>
-            )}
-          </div>
-        </Card>}
-        <div className="stack">
-          {sec('dashboard', 'teamRevenue') && <Card title="Team revenue won" sub="Last 12 months"><Bars height={190} data={months.map((m) => ({ label: monthLabel(m), Won: sum(deals.filter((d) => d.status === 'won' && monthKey(d.closeDate) === m), (d) => d.value) }))} series={[{ key: 'Won', name: 'Revenue won' }]} /></Card>}
-          {can('leads') && sec('dashboard', 'newLeads') && <Link to="/leads" className="card row between" style={{ padding: '14px 16px', color: 'inherit', textDecoration: 'none' }}>
-            <span><span className="strong">{num(waiting)} new leads</span><div className="small muted">Assign them to your team</div></span>
-            <Icon name="ChevronRight" />
-          </Link>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ---------- Admin: is the company and the system healthy? ---------- */
-function AdminDashboard() {
-  const { db, userName, t, sec, canRoute } = useStore();
-  const deals = db.deals;
-  const open = deals.filter((d) => d.status === 'open');
-  const wonYear = sum(wonIn(deals, thisYear()), (d) => d.value);
-  const unpaid = sum(db.invoices, (i) => i.total - (i.paid || 0));
-  const months = lastMonths(12);
-  const teamOf = (id) => db.users.find((u) => u.id === id)?.teamId;
-  const byTeam = months.map((m) => {
-    const row = { label: monthLabel(m) };
-    db.teams.forEach((x) => { row[x.id] = sum(deals.filter((d) => d.status === 'won' && monthKey(d.closeDate) === m && teamOf(d.ownerId) === x.id), (d) => d.value); });
-    return row;
-  });
-  const alerts = [
-    { n: db.products.filter((p) => p.tracked && p.stock <= p.reorder).length, text: 'products at or below reorder level', icon: 'PackageX', to: '/inventory' },
-    { n: db.invoices.filter((i) => i.status === 'Overdue').length, text: 'overdue invoices', icon: 'Receipt', to: '/billing' },
-    { n: db.shipments.filter((s) => s.status === 'Delayed').length, text: 'delayed shipments', icon: 'Truck', to: '/logistics' },
-    { n: db.cases.filter((c) => c.priority === 'Urgent' && !['Closed', 'Rejected'].includes(c.status)).length, text: 'urgent support cases', icon: 'Siren', to: '/cases' },
-    { n: db.transfers.filter((x) => x.status === 'Pending').length, text: 'transfers waiting for a manager', icon: 'ArrowRightLeft', to: '/transfers' },
-  ].filter((a) => a.n > 0 && canRoute(a.to));
-  const roles = [['Admins', 'admin'], ['Managers', 'manager'], ['Sales people', 'sales']].map(([label, r]) => ({ label, n: db.users.filter((u) => u.role === r && u.active).length }));
-  return (
-    <div>
-      <PageHead title={t('dashboard')} sub={`${db.settings.companyName} · ${dateLine()}`}>
-        <HeadLink to="/access" icon="ShieldCheck">{t('access')}</HeadLink>
-        <HeadLink to="/audit" icon="ScrollText">{t('audit')}</HeadLink>
-        <HeadLink primary to="/users" icon="UserCog">{t('users')}</HeadLink>
-      </PageHead>
-      <TodayMeetings />
-      {sec('dashboard', 'kpis') && <div className="g4" style={{ marginBottom: 14 }}>
-        <Kpi label="Revenue won this year" value={moneyK(wonYear)} icon="CircleDollarSign" />
-        <Kpi label="Company pipeline" value={moneyK(sum(open, (d) => d.value))} note={`${open.length} open deals`} icon="Kanban" />
-        <Kpi label="Unpaid invoices" value={moneyK(unpaid)} note={`${db.invoices.filter((i) => i.status === 'Overdue').length} overdue`} icon="Receipt" />
-        <Kpi label="Active users" value={num(db.users.filter((u) => u.active).length)} note={`${db.teams.length} sales teams`} icon="UsersRound" />
-      </div>}
-      <div className="g-21" style={{ alignItems: 'start', marginBottom: 14 }}>
-        {sec('dashboard', 'revenueTeams') && <Card title="Revenue won by team" sub="Last 12 months"><Bars data={byTeam} series={db.teams.map((x) => ({ key: x.id, name: x.name }))} height={280} /></Card>}
-        {sec('dashboard', 'attention') && <Card title="Needs attention">
-          {!alerts.length && <Empty icon="ShieldCheck" text="Nothing needs attention." />}
-          {alerts.map((a) => (
-            <Link key={a.text} to={a.to} className="dashlet" style={{ color: 'inherit', textDecoration: 'none' }}>
-              <span className="kpi-ico" style={{ width: 30, height: 30, background: 'var(--warn-bg)', color: 'var(--warn)' }}><Icon name={a.icon} size={15} /></span>
-              <span className="grow"><strong className="num">{a.n}</strong> {a.text}</span>
-              <Icon name="ChevronRight" size={15} color="var(--ink-3)" />
-            </Link>
-          ))}
-        </Card>}
-      </div>
-      <div className="g3" style={{ alignItems: 'start', marginBottom: 14 }}>
-        {sec('dashboard', 'targets') && <Card title="Team targets" action={<SeeAll to="/teams">{t('teams')}</SeeAll>}>
-          <div className="stack">
-            {db.teams.map((x) => {
-              const won = sum(wonIn(deals.filter((d) => teamOf(d.ownerId) === x.id), thisYear()), (d) => d.value);
-              const p = x.target ? (won / x.target) * 100 : 0;
-              return <div key={x.id}><div className="row between"><span className="strong trunc">{x.name}</span><span className="num small">{moneyK(won)} of {moneyK(x.target)}</span></div><div style={{ marginTop: 5 }}><Progress value={p} /></div><div className="small muted" style={{ marginTop: 3 }}>{pct(p)} · led by {userName(x.managerId)}</div></div>;
-            })}
-          </div>
-        </Card>}
-        {sec('dashboard', 'usersCard') && <Card title="Users and access" action={<SeeAll to="/users">Manage</SeeAll>}>
-          {roles.map((r) => <div key={r.label} className="dashlet"><span className="grow">{r.label}</span><strong className="num">{r.n}</strong></div>)}
-          <div className="dashlet"><span className="grow">Inactive</span><strong className="num">{db.users.filter((u) => !u.active).length}</strong></div>
-        </Card>}
-        {sec('dashboard', 'operations') && <Card title="Operations">
-          <Link to="/orders" className="dashlet" style={{ color: 'inherit', textDecoration: 'none' }}><span className="grow">Orders to fulfil</span><strong className="num">{db.orders.filter((o) => ['Pending', 'Processing'].includes(o.status)).length}</strong></Link>
-          <Link to="/logistics" className="dashlet" style={{ color: 'inherit', textDecoration: 'none' }}><span className="grow">Shipments in transit</span><strong className="num">{db.shipments.filter((s) => s.status === 'In Transit').length}</strong></Link>
-          <Link to="/inventory" className="dashlet" style={{ color: 'inherit', textDecoration: 'none' }}><span className="grow">Stock value at cost</span><strong className="num">{moneyK(sum(db.products.filter((p) => p.tracked), (p) => p.stock * p.cost))}</strong></Link>
-          <Link to="/cases" className="dashlet" style={{ color: 'inherit', textDecoration: 'none' }}><span className="grow">Open support cases</span><strong className="num">{db.cases.filter((c) => !['Closed', 'Rejected'].includes(c.status)).length}</strong></Link>
-        </Card>}
-      </div>
-      {sec('dashboard', 'activity') && <Card title="Recent system activity" action={<SeeAll to="/audit">{t('audit')}</SeeAll>}>
-        {db.audit.slice(0, 6).map((a) => (
-          <div key={a.id} className="dashlet">
-            <Avatar name={userName(a.userId)} size={26} />
-            <span className="grow trunc"><strong>{userName(a.userId)}</strong> <span className="muted">{a.action.toLowerCase()}d</span> {a.label}</span>
-            <span className="small muted nowrap">{relTime(a.at)}</span>
-          </div>
-        ))}
-      </Card>}
-    </div>
+    </Modal>
   );
 }
 
 export default function Dashboard() {
-  const { role } = useStore();
-  if (role === 'admin') return <AdminDashboard />;
-  if (role === 'manager') return <ManagerDashboard />;
-  return <SalesDashboard />;
+  const { db, me, role, can, sec, scope, t, saveDashboard, saveBoards, companyName, userName, toast } = useStore();
+  const [boardId, setBoardId] = useState('main');
+  const [newBoard, setNewBoard] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [who, setWho] = useState('');
+  const [drill, setDrill] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [quick, setQuick] = useState(null);
+  const [dragId, setDragId] = useState(null);
+  const [range, setRange] = useDateRange('Current Fiscal Year');
+  // Admins can narrow to a team or a person, and managers to someone on their team.
+  const teams = role === 'admin' ? db.teams : [];
+  const people = role === 'sales' ? [] : db.users.filter((u) => u.active && u.role !== 'admin' && (role === 'admin' || u.teamId === me.teamId));
+  const ids = !who ? null : new Set(who.startsWith('t:') ? db.users.filter((u) => u.teamId === who.slice(2)).map((u) => u.id) : [who]);
+  // Only the records count here. Saving a layout changes `db` too, and must not redraw every chart.
+  const ctx = useMemo(() => buildContext({ db, me, scope, can, range, ids, names: { companyName, userName } }), [range, who, db.deals, db.leads, db.orders, db.invoices, db.payments, db.cases, db.calls, db.activities, db.followups, db.shipments, db.events, db.aiCalls, db.products, db.users, db.teams, db.transfers, db.stages, db.audit, db.permissions, me.id]);
+
+  // Access control can turn a whole module or a dashboard section off, so the library shrinks with it.
+  const allowed = (w) => (w.module === 'dashboard' || can(w.module)) && sec('dashboard', w.sec) && (!w.needs || can(...w.needs)) && (!w.secOf || sec(...w.secOf));
+  const available = WIDGETS.filter(allowed);
+  const boards = (db.boards || []).filter((b) => b.ownerId === me.id || b.roles?.includes(role));
+  const board = boards.find((b) => b.id === boardId);
+  const myBoard = board?.ownerId === me.id;
+  const readOnly = board && !myBoard;
+  const saved = board ? board.items : db.dashboards?.[me.id];
+  // Each chart appears once, even in a layout saved before this rule. Only the Chart builder can repeat.
+  const seen = new Set();
+  const items = (saved || (DEFAULTS[role] || DEFAULTS.sales).map((k) => ({ id: k, k }))).filter((x) => {
+    const w = widgetOf(x.k);
+    if (!w || !allowed(w) || (!w.multi && seen.has(x.k))) return false;
+    seen.add(x.k);
+    return true;
+  });
+
+  const latest = useRef(items);
+  latest.current = items;
+  // A heading with nothing under it, because of permissions or removed widgets, is left out.
+  const visible = items.filter((x, i) => widgetOf(x.k).type !== 'section' || (items[i + 1] && widgetOf(items[i + 1].k).type !== 'section'));
+  const spans = fitRows(visible.map((x) => x.size || widgetOf(x.k).size));
+  const save = (next) => { if (board) saveBoards((db.boards || []).map((b) => (b.id === board.id ? { ...b, items: next } : b))); else saveDashboard(next); };
+  const ctxRef = useRef(ctx);
+  ctxRef.current = ctx;
+  const onDrill = useRef((w, label) => {
+    const def = DRILLS[w.k];
+    const c = ctxRef.current;
+    const rows = def.rows(c);
+    setDrill({ title: label ? `${w.title}: ${label}` : w.title, kind: def.kind, rows: label ? rows.filter((r) => def.key(r, c) === label) : rows });
+  }).current;
+  const createBoard = (name, from) => {
+    const id = uid('b');
+    saveBoards([...(db.boards || []), { id, name, ownerId: me.id, roles: [], items: BOARD_TEMPLATES[from].items.map((k) => ({ id: uid('w'), k })) }]);
+    setBoardId(id); setNewBoard(false); toast('Dashboard created');
+  };
+  const add = (k) => { save([fresh(k), ...items]); };
+  const remove = (id) => save(items.filter((x) => x.id !== id));
+  const change = (id, patch) => save(latest.current.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+  const move = (id, by) => {
+    const i = items.findIndex((x) => x.id === id);
+    const j = i + by;
+    if (j < 0 || j >= items.length) return;
+    const next = [...items];
+    [next[i], next[j]] = [next[j], next[i]];
+    save(next);
+  };
+  const dropOn = (id) => {
+    if (!dragId || dragId === id) return;
+    const next = items.filter((x) => x.id !== dragId);
+    next.splice(items.findIndex((x) => x.id === id), 0, items.find((x) => x.id === dragId));
+    save(next);
+    setDragId(null);
+  };
+
+  const head = role === 'sales'
+    ? { title: `${greeting()}, ${me.name.split(' ')[0]}`, sub: dateLine() }
+    : { title: role === 'manager' ? db.teams.find((x) => x.id === me.teamId)?.name || t('dashboard') : t('dashboard'), sub: `${db.settings.companyName} · ${dateLine()}` };
+
+  return (
+    <div>
+      <PageHead title={head.title} sub={head.sub}>
+        <DateRange value={range} onChange={setRange} />
+        {people.length > 0 && <select className="select tb-filter" aria-label="Show data for" value={who} onChange={(e) => setWho(e.target.value)}><option value="">{role === 'admin' ? 'Whole company' : 'Whole team'}</option>{teams.length > 0 && <optgroup label="Teams">{teams.map((x) => <option key={x.id} value={`t:${x.id}`}>{x.name}</option>)}</optgroup>}<optgroup label="People">{people.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}</optgroup></select>}
+        {editing ? (
+          <>
+            <Btn icon="RotateCcw" onClick={() => setResetting(true)}>Reset</Btn>
+            <Btn icon="Plus" onClick={() => setAdding(true)}>Add widgets</Btn>
+            <Btn kind="primary" icon="Check" onClick={() => setEditing(false)}>Done</Btn>
+          </>
+        ) : (
+          <>
+            {role === 'sales' && can('leads', 'create') && <Btn icon="Magnet" onClick={() => setQuick('lead')}>New lead</Btn>}
+            {role === 'sales' && can('pipeline', 'create') && <Btn icon="Plus" onClick={() => setQuick('deal')}>New opportunity</Btn>}
+            <Btn icon="Printer" className="no-print" onClick={printPage}>Print or PDF</Btn>
+            {!readOnly && <Btn kind="primary" icon="LayoutDashboard" onClick={() => setEditing(true)}>Customize</Btn>}
+          </>
+        )}
+      </PageHead>
+      <GettingStarted />
+      <div className="wd-boards no-print">
+        <Pills value={board ? board.id : 'main'} onChange={(k) => { setBoardId(k); setEditing(false); }} options={[{ k: 'main', label: 'Overview' }, ...boards.map((b) => ({ k: b.id, label: b.name }))]} />
+        <Btn sm icon="Plus" onClick={() => setNewBoard(true)}>New dashboard</Btn>
+        {myBoard && role !== 'sales' && <Btn sm icon="Share2" onClick={() => setSharing(true)}>{board.roles?.length ? 'Shared' : 'Share'}</Btn>}
+        {myBoard && <Btn sm kind="ghost" icon="Trash2" aria-label={`Delete ${board.name}`} onClick={() => setRemoving(true)} />}
+        {readOnly && <span className="small muted">Shared with you by {userName(board.ownerId)}</span>}
+      </div>
+      <p className="small muted wd-note">Compared with the same number of days before. Open deals, unpaid invoices, stock and to-dos always show today's position.</p>
+      {editing && <p className="notice" style={{ marginTop: 0 }}>Drag a widget to move it, change its size, or remove it. Your layout is only for you, and it's saved as you go.</p>}
+      {!items.length && <div className="card"><Empty icon="LayoutDashboard" text="Your dashboard is empty. Choose Customize, then Add widgets." /></div>}
+      <div className={`wd-grid ${editing ? 'editing' : ''}`}>
+        {visible.map((item, i) => {
+          const w = widgetOf(item.k);
+          const size = item.size || w.size;
+          return (
+            <div key={item.id} className={`wd wd-${size} ${dragId === item.id ? 'dragging' : ''}`} style={{ '--span': spans[i] }} draggable={editing} onDragStart={() => setDragId(item.id)} onDragEnd={() => setDragId(null)} onDragOver={(e) => { if (editing) e.preventDefault(); }} onDrop={(e) => { e.preventDefault(); dropOn(item.id); }}>
+              {editing && (
+                <div className="wd-bar">
+                  <Icon name="GripVertical" size={15} color="var(--ink-3)" />
+                  <span className="small strong trunc grow">{w.title}</span>
+                  <select className="select wd-size" aria-label={`Size of ${w.title}`} value={size} onChange={(e) => change(item.id, { size: e.target.value })}>{SIZES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}</select>
+                  <Btn sm kind="ghost" icon="ArrowLeft" aria-label={`Move ${w.title} earlier`} disabled={i === 0} onClick={() => move(item.id, -1)} />
+                  <Btn sm kind="ghost" icon="ArrowRight" aria-label={`Move ${w.title} later`} disabled={i === visible.length - 1} onClick={() => move(item.id, 1)} />
+                  <Btn sm kind="ghost" icon="X" aria-label={`Remove ${w.title}`} onClick={() => remove(item.id)} />
+                </div>
+              )}
+              <WidgetGuard key={item.k} title={w.title}><Widget item={item} w={w} ctx={ctx} setCfg={(cfg) => change(item.id, { cfg })} choices={available.filter((x) => familyOf(w.k).includes(x.k) && (x.k === w.k || !seen.has(x.k)))} onChoose={(k) => change(item.id, { k, size })} onDrill={onDrill} /></WidgetGuard>
+            </div>
+          );
+        })}
+      </div>
+      {adding && <AddWidgets items={items} available={available.filter((w) => !w.hidden)} onAdd={add} onRemove={remove} onClose={() => setAdding(false)} />}
+      {resetting && <Confirm title="Reset your dashboard?" text={`It goes back to the standard layout for your role. Only your own dashboard changes.`} confirmLabel="Reset" onClose={() => setResetting(false)} onConfirm={() => { if (board) save([]); else saveDashboard(null); toast('Dashboard reset'); }} />}
+      {quick && <RecordQuickCreate kind={quick} onClose={() => setQuick(null)} />}
+      {drill && <RecordsDrawer {...drill} onClose={() => setDrill(null)} />}
+      {newBoard && <NewBoard onCreate={createBoard} onClose={() => setNewBoard(false)} />}
+      {sharing && board && <ShareBoard board={board} onClose={() => setSharing(false)} onSave={(roles) => { saveBoards(db.boards.map((b) => (b.id === board.id ? { ...b, roles } : b))); setSharing(false); toast(roles.length ? 'Dashboard shared' : 'Dashboard is private'); }} />}
+      {removing && board && <Confirm title={`Delete ${board.name}?`} text="It's removed for everyone it was shared with." onClose={() => setRemoving(false)} onConfirm={() => { saveBoards(db.boards.filter((b) => b.id !== board.id)); setBoardId('main'); toast('Dashboard deleted'); }} />}
+    </div>
+  );
 }

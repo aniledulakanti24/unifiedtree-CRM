@@ -5,14 +5,19 @@ import { Avatar, Btn, Card, FormFields, Modal, PageHead, Progress, RecordModal, 
 import { money, moneyK, pct, sum } from '../util';
 
 function TeamDialog({ team, onClose }) {
-  const { db, create, update, toast } = useStore();
+  const { db, me, scopeOf, create, update, toast } = useStore();
   const [v, setV] = useState(team || { name: '', managerId: '', target: 100000, email: '', description: '' });
   const [members, setMembers] = useState(() => db.users.filter((u) => u.teamId === team?.id).map((u) => u.id));
   const [errors, setErrors] = useState({});
-  const eligible = db.users.filter((u) => u.role !== 'admin' && u.active);
+  const companyWide = scopeOf('teams') === 'all';
+  const ledElsewhere = (u) => db.teams.find((x) => x.managerId === u.id && x.id !== team?.id);
+  // Without company-wide access, only people already on your team or on no team can be chosen.
+  const reachable = (u) => companyWide || !u.teamId || u.teamId === me.teamId || u.teamId === team?.id;
+  const eligible = db.users.filter((u) => u.role !== 'admin' && u.active && reachable(u));
+  const leaders = eligible.filter((u) => u.role === 'manager' && !ledElsewhere(u));
   const fields = [
     { k: 'name', label: 'Team name', req: true },
-    { k: 'managerId', label: 'Team leader', type: 'select', req: true, options: db.users.filter((u) => u.role === 'manager').map((u) => ({ value: u.id, label: u.name })) },
+    { k: 'managerId', label: 'Team leader', type: 'select', req: true, options: leaders.map((u) => ({ value: u.id, label: u.name })), hint: leaders.length ? 'Managers who already lead a team are not listed.' : 'No Manager is free to lead this team. Add one in Users & roles, or give their current team a new leader.' },
     { k: 'email', label: 'Email alias', type: 'email' },
     { k: 'target', label: 'Annual invoicing target', type: 'number', min: 0 },
     { k: 'description', label: 'Description', type: 'textarea' },
@@ -37,13 +42,18 @@ function TeamDialog({ team, onClose }) {
         <FormFields fields={fields} values={v} errors={errors} onChange={(k, x) => { setV((p) => ({ ...p, [k]: x })); setErrors((p) => ({ ...p, [k]: undefined })); }} />
         <div>
           <div className="label" style={{ marginBottom: 6 }}>Members</div>
+          {!companyWide && <p className="small muted" style={{ margin: '0 0 8px' }}>Only your team and people with no team are listed. An Admin can move someone from another team.</p>}
           <div className="form-grid">
-            {eligible.map((u) => (
-              <label key={u.id} className="check">
-                <input type="checkbox" checked={members.includes(u.id)} onChange={() => setMembers((p) => (p.includes(u.id) ? p.filter((x) => x !== u.id) : [...p, u.id]))} />
-                <span className="trunc">{u.name}{u.teamId && u.teamId !== team?.id ? <span className="muted small"> · other team</span> : null}</span>
-              </label>
-            ))}
+            {eligible.map((u) => {
+              const leads = ledElsewhere(u);
+              const isLeader = u.id === v.managerId;
+              return (
+                <label key={u.id} className="check">
+                  <input type="checkbox" checked={isLeader || members.includes(u.id)} disabled={isLeader || !!leads} onChange={() => setMembers((p) => (p.includes(u.id) ? p.filter((x) => x !== u.id) : [...p, u.id]))} />
+                  <span className="trunc">{u.name}{isLeader ? <span className="muted small"> · team leader</span> : leads ? <span className="muted small"> · leads {leads.name}</span> : u.teamId && u.teamId !== team?.id ? <span className="muted small"> · other team</span> : null}</span>
+                </label>
+              );
+            })}
           </div>
         </div>
       </div>

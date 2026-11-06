@@ -2,8 +2,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ChevronDown, ChevronRight, Lock, RotateCcw, Search } from 'lucide-react';
 import { ROLES, useStore } from '../store';
-import { Avatar, Badge, Btn, Card, Confirm, PageHead, Pills, Tabs } from '../ui';
+import { Avatar, Badge, Btn, Card, Confirm, PageHead, Pills, RecordModal, Tabs } from '../ui';
 import { ACTIONS, MODULES, SCOPES, allActions, effective, isLocked, normalize, sectionsFor } from '../permissions';
+import { AccessHistory, CompareRoles, FieldAccess, SharingRules, WhoHasAccess } from './AccessExtras';
+import { fmtDate, today } from '../util';
 
 const GROUPS = [...new Set(MODULES.map((m) => m.group))];
 
@@ -114,17 +116,23 @@ function Matrix({ role, valueOf, isCustom, onChange, onResetRow }) {
 }
 
 function RolesTab() {
-  const { db, setRolePermission, applyRolePreset, login, toast } = useStore();
+  const { db, setRolePermission, applyRolePreset, addCustomRole, removeCustomRole, login, toast } = useStore();
+  const [naming, setNaming] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const nav = useNavigate();
   const [role, setRole] = useState('sales');
   const [ask, setAsk] = useState(null);
-  const sample = db.users.find((u) => u.role === role && u.active);
-  const count = db.users.filter((u) => u.role === role).length;
+  const custom = (db.customRoles || []).find((x) => x.id === role);
+  const inRole = (u) => (custom ? u.customRole === role : u.role === role && !u.customRole);
+  const sample = db.users.find((u) => inRole(u) && u.active);
+  const count = db.users.filter(inRole).length;
   const PRESETS = { full: ['Give full access?', 'Every action on every module, for everyone in this role. Data scope stays as it is.'], view: ['Make this role view-only?', 'They keep every module they can see now, but cannot change anything.'], none: ['Remove all access?', 'They will only see their home screen until you grant something.'], reset: ['Restore the default access?', 'This role goes back to its original permissions. Personal changes for individual people are kept.'] };
   return (
     <Card pad={false}>
       <div className="tb-toolbar">
-        <Pills value={role} onChange={setRole} options={Object.entries(ROLES).map(([k, label]) => ({ k, label }))} />
+        <Pills value={role} onChange={setRole} options={[...Object.entries(ROLES).map(([k, label]) => ({ k, label })), ...(db.customRoles || []).map((x) => ({ k: x.id, label: x.name }))]} />
+        <Btn sm icon="Plus" onClick={() => setNaming(true)}>New role</Btn>
+        {custom && <Btn sm kind="danger" icon="Trash2" onClick={() => setRemoving(true)}>Delete role</Btn>}
         <span className="sub">{count} {count === 1 ? 'person' : 'people'} in this role</span>
         <div className="grow" />
         <Btn sm onClick={() => setAsk('full')}>Full access</Btn>
@@ -133,14 +141,16 @@ function RolesTab() {
         <Btn sm icon="RotateCcw" onClick={() => setAsk('reset')}>Restore defaults</Btn>
         {sample && role !== 'admin' && <Btn sm icon="Eye" onClick={() => { login(sample.id); nav('/'); toast(`Viewing as ${sample.name}. Switch back with "View as" in your account panel.`); }}>Preview as {sample.name.split(' ')[0]}</Btn>}
       </div>
-      <Matrix role={role} valueOf={(m) => db.permissions.roles[role][m.key]} onChange={(m, next) => setRolePermission(role, m.key, next)} />
+      <Matrix role={custom?.base || role} valueOf={(m) => db.permissions.roles[role][m.key]} onChange={(m, next) => setRolePermission(role, m.key, next)} />
+      {naming && <RecordModal size="sm" title="New role" saveLabel="Create role" initial={{ base: 'sales' }} onClose={() => setNaming(false)} fields={[{ k: 'name', label: 'Role name', req: true, full: true, placeholder: 'For example, Accounts' }, { k: 'base', label: 'Start from', type: 'select', noBlank: true, full: true, options: [...Object.entries(ROLES).map(([value, label]) => ({ value, label })), ...(db.customRoles || []).map((x) => ({ value: x.id, label: x.name }))], hint: 'Copies this role\'s access, field rules, menu layout and home screen.' }]} check={(v) => ([...Object.values(ROLES), ...(db.customRoles || []).map((x) => x.name)].some((n) => n.toLowerCase() === (v.name || '').trim().toLowerCase()) ? { name: 'That role already exists.' } : {})} onSave={(v) => { addCustomRole(v.name.trim(), v.base); toast('Role created. Assign people to it in Users & roles.'); }} />}
+      {removing && custom && <Confirm title={`Delete ${custom.name}?`} text={`${count} ${count === 1 ? 'person goes' : 'people go'} back to their base role's access.`} onClose={() => setRemoving(false)} onConfirm={() => { removeCustomRole(custom.id); setRole('sales'); toast('Role deleted'); }} />}
       {ask && <Confirm title={PRESETS[ask][0]} text={PRESETS[ask][1]} danger={ask === 'none'} confirmLabel="Apply" onClose={() => setAsk(null)} onConfirm={() => { applyRolePreset(role, ask); toast('Access updated'); }} />}
     </Card>
   );
 }
 
 function PeopleTab({ initial }) {
-  const { db, setUserPermission, clearUserPermissions, login, toast } = useStore();
+  const { db, setUserPermission, clearUserPermissions, setAccessExpiry, login, toast } = useStore();
   const nav = useNavigate();
   const [q, setQ] = useState('');
   const [id, setId] = useState(initial || db.users.find((u) => u.role === 'sales')?.id);
@@ -165,6 +175,8 @@ function PeopleTab({ initial }) {
             <Avatar name={user.name} size={34} />
             <div><div className="strong">{user.name}</div><div className="small muted">Starts from the {ROLES[user.role]} role. Changes here apply to this person only.</div></div>
             <div className="grow" />
+            {customCount(user.id) > 0 && <label className="row small" style={{ gap: 6 }}>Personal access ends<input className="input" style={{ height: 30, width: 150 }} type="date" aria-label="Personal access ends" value={db.accessExpiry?.[user.id] || ''} onChange={(e) => { setAccessExpiry(user.id, e.target.value); toast(e.target.value ? `Ends after ${fmtDate(e.target.value)}, then back to role access` : 'No end date'); }} /></label>}
+            {db.accessExpiry?.[user.id] && db.accessExpiry[user.id] < today() && <Badge tone="warn">Ended</Badge>}
             {customCount(user.id) > 0 && <Btn sm icon="RotateCcw" onClick={() => { clearUserPermissions(user.id); toast('Back to role access'); }}>Reset to role</Btn>}
             {user.role !== 'admin' && <Btn sm icon="Eye" onClick={() => { login(user.id); nav('/'); toast(`Viewing as ${user.name}. Switch back with "View as" in your account panel.`); }}>Preview</Btn>}
           </div>
@@ -187,9 +199,15 @@ export default function Access() {
   return (
     <div>
       <PageHead title={t('access')} sub="You decide which modules, sections and tabs each role and person gets, and what they can view and edit. Changes apply straight away and are recorded in the audit log." />
-      <Tabs value={tab} onChange={setTab} tabs={[{ k: 'roles', label: 'Roles', icon: 'ShieldCheck' }, { k: 'people', label: 'Individual people', icon: 'UserCog' }]} />
+      <Tabs value={tab} onChange={setTab} tabs={[{ k: 'roles', label: 'Roles', icon: 'ShieldCheck' }, { k: 'people', label: 'Individual people', icon: 'UserCog' }, { k: 'fields', label: 'Field access', icon: 'EyeOff' }, { k: 'sharing', label: 'Sharing rules', icon: 'Share2' }, { k: 'who', label: 'Who has access', icon: 'Users' }, { k: 'compare', label: 'Compare roles', icon: 'GitCompare' }, { k: 'history', label: 'Change history', icon: 'History' }]} />
       <fieldset disabled={!can('access', 'edit')} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
-        {tab === 'roles' ? <RolesTab /> : <PeopleTab initial={initialUser} />}
+        {tab === 'roles' && <RolesTab />}
+        {tab === 'people' && <PeopleTab initial={initialUser} />}
+        {tab === 'fields' && <FieldAccess />}
+        {tab === 'sharing' && <SharingRules />}
+        {tab === 'who' && <WhoHasAccess />}
+        {tab === 'compare' && <CompareRoles />}
+        {tab === 'history' && <AccessHistory />}
       </fieldset>
     </div>
   );

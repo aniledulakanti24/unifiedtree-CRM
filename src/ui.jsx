@@ -4,6 +4,8 @@ import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Columns3, Download, Inbo
 import { downloadCsv, initials, toneOf } from './util';
 import { useStore } from './store';
 import { PICKLIST_BY_KEY, cleanOption } from './picklists';
+import { DateRange, inRange, useDateRange } from './dateRange';
+import { Spark } from './charts';
 
 const AVATAR = ['#0e7c66', '#2a64b8', '#7a4fc4', '#b5552a', '#a13c6e', '#2f7d32', '#8a6d00', '#3f6b8a'];
 const hash = (s = '') => [...s].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
@@ -35,6 +37,23 @@ export const Card = ({ title, action, children, className = '', pad = true, sub 
     {pad ? <div className="card-b">{children}</div> : children}
   </section>
 );
+// A headline number: what it is, how it moved against the period before, and a small trend.
+export function Stat({ label, value, note, icon, delta, unit = '%', invert, spark, onClick }) {
+  const shown = delta != null && Number.isFinite(delta) && Math.round(delta) !== 0;
+  const up = delta > 0;
+  const good = invert ? !up : up;
+  return (
+    <section className={`card stat ${onClick ? 'stat-click' : ''}`} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined} aria-label={onClick ? `${label}: ${value}. Open the records` : undefined} onClick={onClick} onKeyDown={onClick ? (e) => { if (e.key === 'Enter') onClick(); } : undefined}>
+      <div className="stat-top"><span className="stat-ico"><Icon name={icon} size={15} /></span><span className="kpi-label">{label}</span></div>
+      <div className="stat-mid">
+        <span className="stat-value">{value}</span>
+        {shown && <span className={`stat-delta ${good ? 'good' : 'bad'}`} title="Compared with the period before"><Icon name={up ? 'TrendingUp' : 'TrendingDown'} size={13} />{Math.abs(Math.round(delta))}{unit}</span>}
+      </div>
+      {note && <div className="kpi-note">{note}</div>}
+      {spark?.some(Boolean) && <div className="stat-spark" aria-hidden="true"><Spark data={spark} height={34} /></div>}
+    </section>
+  );
+}
 export const Kpi = ({ label, value, note, icon }) => (
   <div className="card kpi">
     <div className="grow"><div className="kpi-label">{label}</div><div className="kpi-value">{value}</div>{note && <div className="kpi-note">{note}</div>}</div>
@@ -98,11 +117,32 @@ export function useEsc(fn) {
     return () => window.removeEventListener('keydown', h);
   }, [fn]);
 }
+// Keyboard users stay inside an open dialog, and return to where they were when it closes.
+function useDialogFocus(ref) {
+  useEffect(() => {
+    const before = document.activeElement;
+    const box = ref.current;
+    const items = () => [...box.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])')].filter((el) => el.offsetParent !== null && el.type !== 'hidden');
+    if (!box.contains(document.activeElement)) (items().find((el) => !el.closest('.ov-head')) || items()[0])?.focus();
+    const trap = (e) => {
+      if (e.key !== 'Tab') return;
+      const list = items();
+      if (!list.length || !box.contains(document.activeElement)) return;
+      const first = list[0]; const last = list[list.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    box.addEventListener('keydown', trap);
+    return () => { box.removeEventListener('keydown', trap); if (document.contains(before)) before?.focus?.(); };
+  }, []);
+}
+
 export function Modal({ title, onClose, children, footer, size = '' }) {
+  const box = useRef(null);
+  useDialogFocus(box);
   useEsc(onClose);
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}>
-      <div className={`modal ${size}`} role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined}>
+      <div ref={box} className={`modal ${size}`} role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined}>
         <div className="ov-head"><div className="ov-title">{title}</div><Btn kind="ghost" sm icon="X" aria-label="Close" onClick={onClose} /></div>
         <div className="ov-body">{children}</div>
         {footer && <div className="ov-foot">{footer}</div>}
@@ -111,10 +151,12 @@ export function Modal({ title, onClose, children, footer, size = '' }) {
   );
 }
 export function Drawer({ title, onClose, children, footer, actions }) {
+  const box = useRef(null);
+  useDialogFocus(box);
   useEsc(onClose);
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}>
-      <aside className="drawer" role="dialog" aria-modal="true">
+      <aside ref={box} className="drawer" role="dialog" aria-modal="true" aria-label={typeof title === 'string' ? title : undefined}>
         <div className="ov-head"><div className="ov-title trunc">{title}</div><div className="row">{actions}<Btn kind="ghost" sm icon="X" aria-label="Close" onClick={onClose} /></div></div>
         <div className="ov-body">{children}</div>
         {footer && <div className="ov-foot">{footer}</div>}
@@ -227,7 +269,7 @@ export function FieldInput({ f, value, onChange, err }) {
     case 'textarea': return <textarea className="textarea" rows={f.rows || 3} value={value ?? ''} placeholder={f.placeholder} onChange={(e) => set(e.target.value)} />;
     case 'select': return f.list || f.onAdd ? <ListField f={f} value={value} onChange={onChange} err={err} /> : (
       <select className={`select ${err ? 'err' : ''}`} value={value ?? ''} onChange={(e) => set(e.target.value)}>
-        {!f.noBlank && <option value="">Select…</option>}
+        {!f.noBlank && <option value="">{f.blankLabel || 'Select…'}</option>}
         {f.options.map((o) => <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>)}
       </select>
     );
@@ -243,6 +285,7 @@ export function FieldInput({ f, value, onChange, err }) {
     case 'toggle': return <span className="row"><Toggle on={!!value} onChange={set} label={f.label} /><span className="sub">{value ? 'On' : 'Off'}</span></span>;
     case 'tags': return <TagsInput value={value || []} onChange={set} />;
     case 'radio': return f.list ? <ListField f={f} value={value} onChange={onChange} err={err} /> : <div className="row wrap" style={{ gap: 14, minHeight: 36 }}>{f.options.map((o) => <label key={o} className="check"><input type="radio" name={f.k} checked={value === o} onChange={() => set(o)} />{o}</label>)}</div>;
+    case 'checks': return <div className="row wrap" role="group" aria-label={f.label} style={{ gap: 14, minHeight: 36 }}>{f.options.map((o) => <label key={o} className="check"><input type="checkbox" checked={(value || []).includes(o)} onChange={(e) => set(e.target.checked ? [...(value || []), o] : (value || []).filter((x) => x !== o))} />{o}</label>)}</div>;
     case 'check': return <label className="check" style={{ minHeight: 36 }}><input type="checkbox" checked={!!value} onChange={(e) => set(e.target.checked)} />{f.text || f.label}</label>;
     case 'file': return (
       <label className="dropzone"><Upload size={16} style={{ verticalAlign: -3, marginInlineEnd: 6 }} />{value || 'Click to attach a file'}<input type="file" hidden onChange={(e) => set(e.target.files[0]?.name || '')} /></label>
@@ -258,7 +301,7 @@ export function FormFields({ fields, values, onChange, errors = {} }) {
       {fields.filter((f) => !f.hide).map((f) => (
         <div key={f.k} className={`field ${f.full || ['textarea', 'tags', 'file'].includes(f.type) ? 'full' : ''}`}>
           {f.type !== 'check' && <label className="label">{f.label}{f.req && <span className="req"> *</span>}</label>}
-          <FieldInput f={f} value={values[f.k]} onChange={onChange} err={errors[f.k]} />
+          {f.readOnly ? <fieldset disabled style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}><FieldInput f={f} value={values[f.k]} onChange={onChange} err={errors[f.k]} /></fieldset> : <FieldInput f={f} value={values[f.k]} onChange={onChange} err={errors[f.k]} />}
           {errors[f.k] && <span className="error-text">{errors[f.k]}</span>}
           {f.hint && !errors[f.k] && <span className="hint">{f.hint}</span>}
         </div>
@@ -279,6 +322,10 @@ export function validate(fields, v) {
 export function RecordModal({ title, fields, initial = {}, onSave, onClose, saveLabel = 'Save', size, check }) {
   const [v, setV] = useState(initial);
   const [errors, setErrors] = useState({});
+  const [leaving, setLeaving] = useState(false);
+  // Closing a form with unsaved changes asks first, so a stray click can't lose work.
+  const changed = JSON.stringify(v) !== JSON.stringify(initial);
+  const attempt = () => { if (leaving) return; if (changed) setLeaving(true); else onClose(); };
   const submit = (e) => {
     e.preventDefault();
     const er = { ...validate(fields, v), ...check?.(v) };
@@ -288,31 +335,39 @@ export function RecordModal({ title, fields, initial = {}, onSave, onClose, save
     onClose();
   };
   return (
-    <Modal title={title} onClose={onClose} size={size} footer={<><Btn onClick={onClose}>Cancel</Btn><button type="submit" form="rec-form" className="btn primary">{saveLabel}</button></>}>
+    <Modal title={title} onClose={attempt} size={size} footer={<><Btn onClick={attempt}>Cancel</Btn><button type="submit" form="rec-form" className="btn primary">{saveLabel}</button></>}>
       <form id="rec-form" onSubmit={submit} noValidate>
         <FormFields fields={fields} values={v} errors={errors} onChange={(k, val) => { setV((p) => ({ ...p, [k]: val })); setErrors((p) => ({ ...p, [k]: undefined })); }} />
       </form>
+      {leaving && <Confirm title="Discard your changes?" text="What you typed in this form won't be saved." confirmLabel="Discard" onClose={() => setLeaving(false)} onConfirm={onClose} />}
     </Modal>
   );
 }
 
 const colValue = (c, r) => (c.value ? c.value(r) : r[c.k]);
-export function DataTable({ rows, columns: allColumns, onRow, rowKey = 'id', searchPlaceholder = 'Search…', filters = [], statusTabs, actions, bulk, exportName, initialSort, pageSize = 10, emptyText = 'No matching records.', isSelected, compact }) {
+export function DataTable({ fieldKind, rows, columns: allColumns, onRow, rowKey = 'id', searchPlaceholder = 'Search…', filters = [], statusTabs, actions, bulk, exportName, initialSort, pageSize = 10, emptyText = 'No matching records.', dateOf, noSearch, isSelected, compact }) {
   const { labelOf } = useStore();
-  const { can } = useStore();
-  const columns = allColumns.filter((c) => !c.omit);
+  const { can, prefs, savePrefs, toast, seesField, logExport } = useStore();
+  const visibleColumns = fieldKind ? allColumns.filter((c) => seesField(fieldKind, c.k)) : allColumns;
+  const [viewName, setViewName] = useState('');
+  const tablePrefs = prefs.tables?.[exportName] || {};
+  const saveTable = (patch) => { if (exportName) savePrefs({ tables: { ...prefs.tables, [exportName]: { ...tablePrefs, ...patch } } }); };
+  const [range, setRange] = useDateRange();
+  const columns = visibleColumns.filter((c) => !c.omit && !c.exportOnly);
   const [q, setQ] = useState('');
   const [fv, setFv] = useState({});
   const [tab, setTab] = useState('All');
   const [sort, setSort] = useState(initialSort || null);
   const [page, setPage] = useState(1);
-  const [size, setSize] = useState(pageSize);
-  const [hidden, setHidden] = useState(() => new Set(columns.filter((c) => c.hidden).map((c) => c.k)));
+  const [size, setSizeState] = useState(tablePrefs.size || pageSize);
+  const setSize = (n) => { setSizeState(n); saveTable({ size: n }); };
+  const [hidden, setHiddenState] = useState(() => new Set(tablePrefs.hidden || columns.filter((c) => c.hidden).map((c) => c.k)));
+  const setHidden = (fn) => { const next = fn(hidden); setHiddenState(next); saveTable({ hidden: [...next] }); };
   const [sel, setSel] = useState(new Set());
   const visible = columns.filter((c) => !hidden.has(c.k));
 
   const filtered = useMemo(() => {
-    let out = rows;
+    let out = dateOf ? rows.filter((r) => inRange(dateOf(r), range)) : rows;
     if (statusTabs && tab !== 'All') out = out.filter((r) => statusTabs.get(r) === tab);
     filters.forEach((f) => { const val = fv[f.k]; if (val) out = out.filter((r) => String(f.get(r)) === val); });
     if (q.trim()) {
@@ -330,15 +385,18 @@ export function DataTable({ rows, columns: allColumns, onRow, rowKey = 'id', sea
       }
     }
     return out;
-  }, [rows, q, fv, tab, sort, columns, filters, statusTabs]);
+  }, [rows, q, fv, tab, sort, columns, filters, statusTabs, range]);
 
+  const filtering = !!q.trim() || Object.values(fv).some(Boolean) || tab !== 'All' || !!range.from;
+  const clearAll = () => { setQ(''); setFv({}); setTab('All'); setRange({ preset: 'All time', from: '', to: '' }); };
+  const views = tablePrefs.views || [];
   const pages = Math.max(1, Math.ceil(filtered.length / size));
   const cur = Math.min(page, pages);
   const shown = filtered.slice((cur - 1) * size, cur * size);
-  useEffect(() => { setPage(1); }, [q, fv, tab, size]);
+  useEffect(() => { setPage(1); }, [q, fv, tab, size, range]);
   const toggleSort = (c) => { if (c.sort === false) return; setSort((s) => (s?.k === c.k ? { k: c.k, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { k: c.k, dir: 'asc' })); };
   const allShown = shown.length > 0 && shown.every((r) => sel.has(r[rowKey]));
-  const exportCsv = () => downloadCsv(exportName, [visible.map((c) => c.label), ...filtered.map((r) => visible.map((c) => colValue(c, r)))]);
+  const exportCsv = () => { const out = [...visible, ...visibleColumns.filter((c) => c.exportOnly)]; downloadCsv(exportName, [out.map((c) => c.label), ...filtered.map((r) => out.map((c) => colValue(c, r)))]); logExport(exportName, filtered.length); };
 
   return (
     <div className="card">
@@ -348,14 +406,35 @@ export function DataTable({ rows, columns: allColumns, onRow, rowKey = 'id', sea
         </div>
       )}
       <div className="tb-toolbar">
-        <div className="tb-search"><Search size={15} /><input className="input" aria-label="Search table" placeholder={searchPlaceholder} value={q} onChange={(e) => setQ(e.target.value)} /></div>
+        {!noSearch && <div className="tb-search"><Search size={15} /><input className="input" aria-label="Search table" placeholder={searchPlaceholder} value={q} onChange={(e) => setQ(e.target.value)} /></div>}
+        {dateOf && <DateRange value={range} onChange={setRange} allowAll />}
         {filters.map((f) => (
           <select key={f.k} aria-label={f.label} className="select tb-filter" value={fv[f.k] || ''} onChange={(e) => setFv((p) => ({ ...p, [f.k]: e.target.value }))}>
             <option value="">{f.label}: All</option>
             {f.options.map((o) => <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? labelOf(o)}</option>)}
           </select>
         ))}
+        {filtering && <button type="button" className="btn ghost" onClick={clearAll}><X size={15} />Clear filters</button>}
         <div className="grow" />
+        {exportName && (
+          <Popover width={250} trigger={({ toggle }) => <button type="button" className="btn" onClick={toggle}><Lucide.Bookmark size={15} />Views{views.length > 0 && <span className="muted"> {views.length}</span>}</button>}>
+            {(close) => (
+              <div>
+                {!views.length && <div className="small muted" style={{ padding: '4px 8px 8px' }}>Set up your filters, then save them here to reuse.</div>}
+                {views.map((w) => (
+                  <div key={w.name} className="row" style={{ gap: 2 }}>
+                    <button type="button" className="pop-item grow" onClick={() => { setQ(w.q || ''); setFv(w.fv || {}); setTab(w.tab || 'All'); setRange(w.range || { preset: 'All time', from: '', to: '' }); close(); }}><span className="trunc">{w.name}</span></button>
+                    <Btn sm kind="ghost" icon="X" aria-label={`Delete view ${w.name}`} onClick={() => saveTable({ views: views.filter((x) => x.name !== w.name) })} />
+                  </div>
+                ))}
+                <form className="row" style={{ padding: 6, gap: 6 }} onSubmit={(e) => { e.preventDefault(); const name = viewName.trim(); if (!name) return; saveTable({ views: [...views.filter((x) => x.name !== name), { name, q, fv, tab, range }] }); setViewName(''); toast('View saved'); }}>
+                  <input className="input" aria-label="Name for this view" placeholder="Name this view" value={viewName} onChange={(e) => setViewName(e.target.value)} />
+                  <button type="submit" className="btn" disabled={!viewName.trim()}>Save</button>
+                </form>
+              </div>
+            )}
+          </Popover>
+        )}
         <Popover width={200} trigger={({ toggle }) => <button type="button" className="btn" onClick={toggle}><Columns3 size={15} />Columns</button>}>
           {columns.filter((c) => c.label).map((c) => (
             <label key={c.k} className="pop-item check"><input type="checkbox" checked={!hidden.has(c.k)} onChange={() => setHidden((p) => { const n = new Set(p); if (n.has(c.k)) n.delete(c.k); else n.add(c.k); return n; })} />{c.label}</label>
@@ -368,7 +447,7 @@ export function DataTable({ rows, columns: allColumns, onRow, rowKey = 'id', sea
         <div className="bulkbar">{sel.size} selected {bulk(rows.filter((r) => sel.has(r[rowKey])), () => setSel(new Set()))}<Btn kind="ghost" sm onClick={() => setSel(new Set())}>Clear</Btn></div>
       )}
       <div className="tb-wrap">
-        <table className="table">
+        <table className="table tb-cards">
           <thead>
             <tr>
               {bulk && <th style={{ width: 34 }}><input type="checkbox" aria-label="Select page" checked={allShown} onChange={() => setSel((p) => { const n = new Set(p); shown.forEach((r) => (allShown ? n.delete(r[rowKey]) : n.add(r[rowKey]))); return n; })} /></th>}
@@ -383,12 +462,12 @@ export function DataTable({ rows, columns: allColumns, onRow, rowKey = 'id', sea
             {shown.map((r) => (
               <tr key={r[rowKey]} className={`${onRow ? 'clickable' : ''} ${sel.has(r[rowKey]) || isSelected?.(r) ? 'sel' : ''}`} onClick={() => onRow?.(r)}>
                 {bulk && <td onClick={(e) => e.stopPropagation()}><input type="checkbox" aria-label="Select row" checked={sel.has(r[rowKey])} onChange={() => setSel((p) => { const n = new Set(p); if (n.has(r[rowKey])) n.delete(r[rowKey]); else n.add(r[rowKey]); return n; })} /></td>}
-                {visible.map((c) => <td key={c.k} className={`${c.align === 'r' ? 'r num' : ''} ${c.nowrap ? 'nowrap' : ''}`} onClick={c.stop ? (e) => e.stopPropagation() : undefined}>{c.render ? c.render(r) : colValue(c, r) ?? '—'}</td>)}
+                {visible.map((c) => <td key={c.k} data-label={typeof c.label === 'string' ? c.label : ''} className={`${c.align === 'r' ? 'r num' : ''} ${c.nowrap ? 'nowrap' : ''}`} onClick={c.stop ? (e) => e.stopPropagation() : undefined}>{c.render ? c.render(r) : colValue(c, r) ?? '—'}</td>)}
               </tr>
             ))}
           </tbody>
         </table>
-        {!shown.length && <div className="empty"><Inbox size={24} /><div>{emptyText}</div></div>}
+        {!shown.length && <div className="empty"><Inbox size={24} /><div>{filtering ? 'Nothing matches these filters.' : emptyText}</div>{filtering && <div style={{ marginTop: 10 }}><button type="button" className="btn sm" onClick={clearAll}>Clear filters</button></div>}</div>}
       </div>
       <div className="tb-foot">
         <span className="num">{filtered.length ? `${(cur - 1) * size + 1}–${Math.min(cur * size, filtered.length)} of ${filtered.length}` : '0 records'}</span>

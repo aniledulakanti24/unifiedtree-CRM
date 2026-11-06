@@ -1,3 +1,4 @@
+import { simulateAiCall } from './aiVoice';
 import { addDays, iso } from './util';
 import { defaultPermissions } from './permissions';
 
@@ -87,7 +88,7 @@ export function seed() {
       value: int(4, 96) * 1000, probability: prob, priority: pick([0, 0, 1, 1, 2, 3]), source: pick(sources), closeDate,
       tags: r() > 0.6 ? [pick(['Upsell', 'New logo', 'Renewal', 'Competitive'])] : [],
       lostReason: status === 'lost' ? pick(['Too expensive', 'Chose a competitor', 'No budget', 'Timing not right', 'Missing features']) : '',
-      notes: '', createdAt: new Date(new Date(closeDate).getTime() - int(15, 80) * 864e5).toISOString(),
+      notes: '', createdAt: new Date(Math.min(Date.now() - int(1, 40) * 864e5, new Date(closeDate).getTime() - int(15, 80) * 864e5)).toISOString(),
     };
   });
 
@@ -256,11 +257,78 @@ export function seed() {
   const meetingRequests = [{ id: 'mr1', requestedBy: 'u4', toId: 'u1', topic: 'Pricing for the Kestrel renewal', note: 'They want a discount above my limit. I need a decision before Friday.', preferredAt: preferred.toISOString(), minutes: 30, status: 'Pending', createdAt: askedAt, history: [{ at: askedAt, by: 'u4', action: 'Requested', toId: 'u1' }] }];
 
   const settings = {
-    companyName: 'Unifiedtree', currency: 'USD', timezone: 'America/New_York', fiscalStart: 'January', supportEmail: 'support@unifiedtree.demo', businessNumber: '+91 80 0000 0100',
+    companyName: 'Unifiedtree', currency: 'USD', timezone: 'America/New_York', fiscalStart: 'January', locale: 'en-US', weekStart: 'Sunday', taxName: 'Tax', taxIdLabel: 'Tax ID', taxId: '', taxByCountry: {}, staleDays: 14, aiAssistant: true, aiDealScore: true, aiHealth: true, aiWriter: true, aiNextBest: true, supportEmail: 'support@unifiedtree.demo', businessNumber: '+91 80 0000 0100', state: '', address: '', requirePasswords: false,
     useLeads: true, multiTeams: true, ruleAssignment: false, assignInterval: 'Daily', predictiveScoring: true, leadMining: true, emailGateway: false, gatewayAlias: 'sales', recurring: false, visits: false, partnerAutocomplete: true,
-    voiceEnabled: true, videoEnabled: true, whatsappEnabled: true, requireLostReason: true, transferNeedsApproval: true, lowStockAlerts: true, allowBackorder: false, invoicePrefix: 'INV-', defaultTerms: '30 days', taxRate: 8,
+    voiceEnabled: true, videoEnabled: true, whatsappEnabled: true, requireLostReason: true, transferNeedsApproval: true, lowStockAlerts: true, allowBackorder: false, pricesIncludeTax: false, reverseCharge: false, homeCountry: 'USA', taxByRegion: {}, passwordPolicy: { min: 8, number: true, symbol: false, days: 0 }, lockAfter: 5, lockMinutes: 15, sessionTimeout: 0, twoStep: 'off', sso: { google: true, microsoft: true, saml: false }, ipAllow: '', backupFreq: 'Daily', backupKeep: 7, backupOffsite: false, opsReadOnly: true, maxDiscount: 20, poApprovalLimit: 5000, priceLists: { Partner: 10, Enterprise: 15 }, invoicePrefix: 'INV-', defaultTerms: '30 days', taxRate: 8,
   };
-  return { users, teams, companies, contacts, deals, leads, activities, activityTypes, lostReasons, events, products, warehouses, stockMoves, orders, invoices, payments, quotes, shipments, vehicles, cases, transfers, audit, notifications, calls, followups, conversations, meetingRequests, picklists: {}, labels: {}, titles: {}, stages: DEFAULT_STAGES, chatter: {}, settings, permissions: defaultPermissions(), seededAt: iso(new Date()) };
+  // Group chats: one for each team, and one for the whole company.
+  const groupChat = (id, name, members, a, b, hours) => {
+    const at = Date.now() - hours * 36e5;
+    conversations.push({ id, kind: 'team', group: true, name, members, reads: {}, createdAt: new Date(at).toISOString(), messages: [{ id: `${id}a`, at: new Date(at).toISOString(), by: members[0], text: a, status: 'Sent' }, { id: `${id}b`, at: new Date(at + 12e5).toISOString(), by: members[members.length - 1], text: b, status: 'Sent' }] });
+  };
+  groupChat('tgall', 'Everyone', users.filter((u) => u.active).map((u) => u.id), 'Quarter-end review is on Friday at 4.', 'Thanks, I will have my numbers ready.', 30);
+  teams.forEach((t, i) => groupChat(`tg${t.id}`, t.name, users.filter((u) => u.active && u.teamId === t.id).map((u) => u.id), 'Please update your forecast before the weekly call.', 'Will do.', 8 + i * 9));
+  const aiAgents = [
+    { id: 'aia1', name: 'Asha, lead qualifier', purpose: 'Lead qualification', language: 'English', voice: 'Asha (female)', handoff: 'owner', greeting: 'Hello {name}, this is Asha, an AI assistant calling from Unifiedtree. Is this a good time?', instructions: 'Be brief. Ask about need, size and timing. Never promise a discount.', active: true, inbound: false },
+    { id: 'aia2', name: 'Arjun, payment reminders', purpose: 'Payment reminder', language: 'Hindi', voice: 'Arjun (male)', handoff: 'manager', greeting: 'Hello {name}, this is Arjun, an AI assistant calling about your account with Unifiedtree.', instructions: 'Be polite. Ask for a payment date. Hand over any dispute to a person.', active: true, inbound: false },
+    { id: 'aia3', name: 'Meera, reception', purpose: 'Answer incoming calls', language: 'English', voice: 'Meera (female)', handoff: 'owner', greeting: 'Thanks for calling Unifiedtree. This is Meera, an AI assistant. Everyone is busy right now.', instructions: 'Take a message and the best time to call back.', active: true, inbound: false },
+  ];
+  const aiCalls = contacts.slice(0, 14).map((c, i) => {
+    const agent = aiAgents[i % 2];
+    return { id: `aic${i + 1}`, agentId: agent.id, agentName: agent.name, campaignId: '', name: `${c.first} ${c.last}`, phone: c.phone, companyId: c.companyId, relatedType: 'contact', relatedId: c.id, ownerId: c.ownerId, at: new Date(Date.now() - (i + 1) * 7 * 36e5).toISOString(), direction: 'Outgoing', ...simulateAiCall(agent, `${c.first} ${c.last}`, ((i * 37) % 100) / 100) };
+  });
+  const suppliers = [
+    ['Hexa Components', 'Lena Fischer', 'orders@hexa.example', 'Boston', 10],
+    ['Norbury Supply', 'Tom Norbury', 'sales@norbury.example', 'Austin', 14],
+    ['Pacific Parts', 'Mei Tan', 'hello@pacificparts.example', 'Rotterdam', 21],
+  ].map(([name, contact, email, city, leadDays], i) => ({ id: `sup${i + 1}`, name, contact, email, phone: `+1 555 010 ${10 + i}`, city, leadDays, terms: 'Net 30' }));
+  const poAt = (i, back, status, part) => {
+    const lines = physical.slice(i, i + 2).map((p) => ({ productId: p.id, name: p.name, qty: 40, price: p.cost, received: status === 'Received' ? 40 : status === 'Partly received' ? part : 0 }));
+    return { id: `po${i + 1}`, number: `PO-${2100 + i}`, supplierId: suppliers[i % 3].id, warehouseId: warehouses[i % 3].id, date: addDays(-back), expected: addDays(14 - back), items: lines, total: lines.reduce((a, x) => a + x.qty * x.price, 0), status, notes: '', createdBy: users[0].id, createdAt: ts(-back) };
+  };
+  const purchaseOrders = [poAt(0, 34, 'Received'), poAt(2, 20, 'Partly received', 15), poAt(4, 6, 'Sent')];
+  physical.slice(0, 5).forEach((p) => { if (p.stock >= 9) p.stockBy = { [warehouses.find((w) => w.id !== p.warehouseId).id]: Math.floor(p.stock / 3) }; });
+  const planItems = products.filter((p) => !p.tracked).slice(0, 1).map((p) => ({ productId: p.id, name: p.name, qty: 10, price: p.price }));
+  const recurringInvoices = planItems.length ? [{ id: 'rec1', title: 'Monthly support plan', companyId: companies[0].id, ownerId: companies[0].ownerId, freq: 'Monthly', next: addDays(12), dueDays: 30, items: planItems, active: true, count: 0, createdAt: ts(-20) }] : [];
+
+  // Salespeople don't see what products cost by default. The Admin can change this under Field access.
+  const SAMPLE_DEVICES = [['Chrome on Windows', '198.51.100.14', 'Boston, USA'], ['Safari on iOS', '198.51.100.77', 'Austin, USA'], ['Edge on Windows', '192.0.2.40', 'London, UK'], ['Chrome on Mac', '192.0.2.81', 'Berlin, Germany'], ['Chrome on Android', '198.51.100.120', 'Singapore']];
+  const loginLog = Array.from({ length: 40 }, (_, i) => {
+    const u = users[i % users.length];
+    const [device, ip, place] = SAMPLE_DEVICES[i % SAMPLE_DEVICES.length];
+    const failed = i % 11 === 7;
+    return { id: `lg${i + 1}`, at: new Date(Date.now() - (i + 1) * 5 * 36e5).toISOString(), userId: u.id, method: i % 6 === 0 ? 'Google (simulated)' : 'Password', result: failed ? 'Failed' : 'Success', device, ip, place };
+  });
+  const sessions = users.slice(1, 4).map((u, i) => { const [device, ip, place] = SAMPLE_DEVICES[i]; return { id: `ses${i + 1}`, userId: u.id, at: new Date(Date.now() - (i + 2) * 36e5).toISOString(), device, ip, place }; });
+
+  const kbAt = addDays(-20);
+  const kbArticles = [
+    ['Resetting a gateway that drops offline', 'Devices', 'Hold the reset button for ten seconds, wait for the green light, then check that the gateway appears online. If it still drops offline after an update, send us its serial number.', 148, 31, 4],
+    ['Pairing a handheld scanner', 'Devices', 'Turn on the scanner, open Settings, choose Pairing and scan the code on your gateway. If the scanner is not pairing, charge it for an hour and try again.', 96, 22, 3],
+    ['Why an invoice shows a different tax rate', 'Billing', 'Tax depends on the rate set for your country and on each product. If your invoice shows the wrong tax rate, tell us your tax number and we will correct it.', 73, 14, 5],
+    ['What to do if a delivery arrives damaged', 'Delivery', 'Take a photo of the box and the item, then send them to us within seven days. We will send a replacement or a credit for the damaged delivery.', 61, 19, 1],
+    ['Adding seats and new users', 'Account', 'An admin can add new seats under Users. Each new user gets an email to set their password. Contact us if you cannot add new seats.', 88, 17, 2],
+    ['Requesting an export of your data', 'Account', 'Send a request from your portal and tell us which data you need. We prepare a data export within three working days.', 34, 6, 1],
+  ].map(([title, category, body, views, helpful, notHelpful], i) => ({ id: `kb${i + 1}`, title, category, body, views, helpful, notHelpful, status: 'Published', updatedAt: kbAt, createdAt: kbAt }));
+  const cannedReplies = [
+    ['We are looking into it', 'Hi {name}, thanks for getting in touch. We are looking into this and will update you soon.'],
+    ['Need more details', 'Hi {name}, could you send a few more details, such as a screenshot or the exact error? That will help us fix this faster.'],
+    ['Issue resolved', 'Hi {name}, this should now be fixed. Please let us know if you still see the problem.'],
+  ].map(([name, text], i) => ({ id: `cr${i + 1}`, name, text }));
+
+  return { opsRequests: [], emailTemplates: [], emailCampaigns: [], emailSuppressed: [], waTemplates: [], waCampaigns: [], formStats: {}, formSubmissions: [], forecastCalls: [], forecastSnapshots: [], quotas: {}, aiDnc: [], kbArticles, cannedReplies, syncRuns: [], apiKeys: [], webhooks: [], webhookLog: [], loginLog, sessions, recycleBin: [], fieldRules: { sales: { product: { cost: 'hidden' } } }, sharingRules: [], accessExpiry: {}, suppliers, purchaseOrders, recurringInvoices, creditNotes: [], stockTransfers: [], stockCounts: [], approvals: [], ruleRuns: [], boards: [], sequences: [
+    { id: 'seq1', name: 'New lead follow-up', steps: [{ day: 0, type: 'Call', text: 'Call {name} to introduce yourself' }, { day: 2, type: 'Email', text: 'Email {name} with useful information' }, { day: 5, type: 'Call', text: 'Call {name} again' }, { day: 9, type: 'Email', text: 'Final check-in with {name}' }] },
+    { id: 'seq2', name: 'Win back a quiet prospect', steps: [{ day: 0, type: 'Email', text: 'Email {name} with what has changed' }, { day: 7, type: 'Call', text: 'Call {name}' }] },
+  ], prefs: {}, dashboards: {}, layoutV3: true, fyV1: true, aiAgents, aiCalls, aiCampaigns: [], groupsV1: true, users, teams, companies, contacts, deals, leads, activities, activityTypes, lostReasons, events, products, warehouses, stockMoves, orders, invoices, payments, quotes, shipments, vehicles, cases, transfers, audit, notifications, calls, followups, conversations, meetingRequests, picklists: {}, labels: {}, titles: {}, formConfig: {}, emails: [], connections: {},
+    automations: [
+      { id: 'rule1', name: 'Welcome new customers', active: true, trigger: 'deal.won', conditions: [], actions: [{ type: 'task', text: 'Send the welcome pack for {name}', days: 1, to: 'owner' }], runs: 0 },
+      { id: 'rule2', name: 'Tell the manager about big leads', active: true, trigger: 'lead.created', conditions: [{ field: 'expected', op: 'gt', value: 25000 }], actions: [{ type: 'notify', text: 'Big new lead: {name}', days: 0, to: 'manager' }], runs: 0 },
+      { id: 'rule3', name: 'Chase overdue invoices', active: true, trigger: 'invoice.overdue', days: 0, conditions: [], actions: [{ type: 'email', text: 'Payment reminder for {name}', days: 0, to: 'owner' }, { type: 'task', text: 'Call about overdue invoice {name}', days: 1, to: 'owner' }], runs: 0 },
+      { id: 'rule4', name: 'Tell customers about deliveries', active: true, trigger: 'shipment.status', conditions: [], actions: [{ type: 'whatsapp', text: 'Update on delivery {name}: it is now {status}.', days: 0, to: 'owner' }], runs: 0 },
+      { id: 'rule5', name: 'Flag stuck deals', active: false, trigger: 'deal.stuck', days: 14, conditions: [], actions: [{ type: 'notify', text: 'No activity for 14 days: {name}', days: 0, to: 'owner' }, { type: 'notify', text: 'Stuck deal on your team: {name}', days: 0, to: 'manager' }], runs: 0 },
+    ],
+    rulesV2: true, reports: [], scheduled: [], customRoles: [], lowStockSeen: [],
+    webForms: [{ id: 'wf1', name: 'Contact us', source: 'Website', thanks: 'Thanks. We will be in touch soon.', fields: ['email', 'phone', 'notes'], submissions: 0 }], stages: DEFAULT_STAGES, chatter: {}, settings, permissions: defaultPermissions(), seededAt: iso(new Date()) };
 }
 
 // A new company has no records, only the CRM's default configuration and its first admin.
@@ -271,6 +339,6 @@ export function blankCompany(name, admin) {
     ...empty, stages: base.stages, activityTypes: base.activityTypes, lostReasons: base.lostReasons,
     warehouses: [{ id: 'w1', name: 'Main warehouse', code: 'MAIN', city: '', capacity: 10000 }],
     users: admin ? [{ ...admin, teamId: null }] : [],
-    settings: { ...base.settings, companyName: name, supportEmail: '', businessNumber: `+91 80 0000 01${String(Math.floor(Math.random() * 90) + 10)}` },
+    settings: { ...base.settings, companyName: name, supportEmail: '', businessNumber: `+1 555 01${String(Math.floor(Math.random() * 90) + 10)}` },
   };
 }

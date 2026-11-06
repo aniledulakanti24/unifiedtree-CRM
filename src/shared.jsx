@@ -1,15 +1,21 @@
-import React, { useState } from 'react';
+import { getLocale } from './util';
+import React, { useRef, useState } from 'react';
 import { CheckCircle2, Clock, MessageSquare, Pencil, Send, StickyNote, Trash2 } from 'lucide-react';
 import { Avatar, Badge, Btn, Empty, FormFields, Icon, Modal, RecordModal, validate } from './ui';
 import { RECORD_ENTITY, useStore } from './store';
-import { addDays, fmtDate, relTime, today, uid } from './util';
+import { REPEATS } from './calendarTools';
+import { NO_RATE, addDays, dealFromForm, docCur, fmtDate, inDoc, lineTotal, mainCurrency, priceListDiscount, rateOf, relTime, round2, today, uid } from './util';
+import { findDuplicate } from './engine';
 
 export const dealFields = (s, { owner = true } = {}) => [
   { k: 'title', label: 'Opportunity', req: true, full: true },
   { k: 'companyId', label: 'Customer', type: 'company', req: true },
   { k: 'value', label: 'Expected revenue', type: 'number', min: 0, req: true },
+  { k: 'currency', label: 'Currency', type: 'select', list: 'currency', blankLabel: "Customer's currency" },
   { k: 'closeDate', label: 'Expected closing', type: 'date', req: true },
   { k: 'source', label: 'Source', type: 'select', list: 'leadSource' },
+  { k: 'pipeline', label: 'Pipeline', type: 'select', list: 'dealPipeline', blankLabel: 'New business' },
+  { k: 'competitor', label: 'Competing against', type: 'select', list: 'competitor', blankLabel: 'Nobody known' },
   { k: 'ownerId', label: 'Salesperson', type: 'user', req: true, hide: !owner },
   { k: 'tags', label: 'Tags', type: 'tags' },
   { k: 'notes', label: 'Internal notes', type: 'textarea' },
@@ -50,9 +56,14 @@ export const companyFields = ({ owner = true } = {}) => [
   { k: 'size', label: 'Company size', type: 'select', list: 'companySize' },
   { k: 'address', label: 'Street' },
   { k: 'city', label: 'City' },
-  { k: 'country', label: 'Country' },
+  { k: 'country', label: 'Country', type: 'select', list: 'country' },
   { k: 'taxId', label: 'Tax ID' },
+  { k: 'state', label: 'State or region' },
+  { k: 'taxExempt', label: 'Tax', type: 'check', text: 'This customer is tax exempt' },
+  { k: 'taxExemptRef', label: 'Exemption certificate number' },
+  { k: 'timezone', label: 'Time zone', type: 'select', list: 'timeZone', blankLabel: 'Not set' },
   { k: 'paymentTerms', label: 'Payment terms', type: 'select', list: 'paymentTerms' },
+  { k: 'currency', label: 'Currency', type: 'select', list: 'currency', blankLabel: 'Main currency' },
   { k: 'priceList', label: 'Price list', type: 'select', list: 'priceList' },
   { k: 'ownerId', label: 'Salesperson', type: 'user', req: true, hide: !owner },
   { k: 'tags', label: 'Tags', type: 'tags' },
@@ -64,7 +75,7 @@ export function ActivityDialog({ related, initial, onClose }) {
   const { db, me, can, create, update, toast, addChatter } = useStore();
   const editing = !!initial?.id;
   const firstType = db.activityTypes[0];
-  const [v, setV] = useState(() => initial || { typeId: firstType.id, summary: firstType.summary, due: addDays(firstType.delay), ownerId: related?.ownerId || me.id, note: '', priority: 'Medium', tag: 'Sales' });
+  const [v, setV] = useState(() => initial || { typeId: firstType.id, summary: firstType.summary, due: addDays(firstType.delay), ownerId: related?.ownerId || me.id, note: '', priority: 'Medium', tag: 'Sales', repeat: 'Never', subtasks: [] });
   const [errors, setErrors] = useState({});
   const set = (k, val) => {
     setV((p) => {
@@ -79,6 +90,8 @@ export function ActivityDialog({ related, initial, onClose }) {
     { k: 'due', label: 'Due date', type: 'date', req: true },
     { k: 'summary', label: 'Summary', req: true, placeholder: 'e.g. Discuss proposal' },
     { k: 'ownerId', label: 'Assigned to', type: 'user', req: true },
+    { k: 'priority', label: 'Priority', type: 'select', noBlank: true, options: ['High', 'Medium', 'Low'] },
+    { k: 'repeat', label: 'Repeats', type: 'select', noBlank: true, options: REPEATS, hint: 'Finishing it makes the next one.' },
     { k: 'note', label: 'Notes', type: 'textarea', placeholder: 'Log a note…' },
   ];
   const save = (status) => {
@@ -110,6 +123,22 @@ export function ActivityDialog({ related, initial, onClose }) {
     </>}>
       {related && <div className="sub" style={{ marginBottom: 12 }}>For <strong>{related.label}</strong></div>}
       <FormFields fields={fields} values={v} errors={errors} onChange={set} />
+      <div style={{ marginTop: 12 }}>
+        <div className="label" style={{ marginBottom: 6 }}>Checklist</div>
+        <div className="stack-s">
+          {(v.subtasks || []).map((x) => (
+            <div key={x.id} className="row">
+              <input type="checkbox" aria-label={`Done: ${x.text}`} checked={!!x.done} onChange={(e) => set('subtasks', v.subtasks.map((y) => (y.id === x.id ? { ...y, done: e.target.checked } : y)))} style={{ accentColor: 'var(--brand)', width: 16, height: 16 }} />
+              <span className="grow" style={x.done ? { textDecoration: 'line-through', color: 'var(--ink-3)' } : undefined}>{x.text}</span>
+              <Btn sm kind="ghost" icon="X" aria-label={`Remove ${x.text}`} onClick={() => set('subtasks', v.subtasks.filter((y) => y.id !== x.id))} />
+            </div>
+          ))}
+          <form className="row" onSubmit={(e) => { e.preventDefault(); const t = e.target.elements.step.value.trim(); if (t) { set('subtasks', [...(v.subtasks || []), { id: uid('st'), text: t, done: false }]); e.target.reset(); } }}>
+            <input name="step" className="input" aria-label="Add a step" placeholder="Add a step…" />
+            <Btn sm type="submit" icon="Plus">Add</Btn>
+          </form>
+        </div>
+      </div>
     </Modal>
   );
 }
@@ -186,7 +215,7 @@ export function ActivityList({ items, related, emptyText = 'No planned activitie
 
 // The Odoo chatter: messages and notes on the record, with its planned activities.
 export function Chatter({ related }) {
-  const { db, me, can, addChatter, toast, userName } = useStore();
+  const { db, me, can, addChatter, sendEmail, toast, userName } = useStore();
   const [mode, setMode] = useState('note');
   const [text, setText] = useState('');
   const [sched, setSched] = useState(false);
@@ -198,8 +227,10 @@ export function Chatter({ related }) {
   const post = () => {
     if (!text.trim()) return;
     addChatter(key, mode, text.trim());
+    const email = mode === 'message' ? db[{ deal: 'contacts', lead: 'leads', contact: 'contacts', company: 'companies' }[related.type]]?.find((r) => r.id === (related.type === 'deal' ? db.deals.find((d) => d.id === related.id)?.contactId : related.id))?.email : '';
+    if (email) sendEmail({ to: email, subject: `Message about ${related.label}`, body: text.trim(), ownerId: me.id, relatedType: related.type, relatedId: related.id });
     setText('');
-    toast(mode === 'message' ? 'Logged. Email sending is not connected yet.' : 'Note logged');
+    toast(mode === 'message' ? (email ? `Saved as sent to ${email}. No real email was sent.` : 'Logged. This record has no email address.') : 'Note logged');
   };
   const KIND = { note: StickyNote, message: Send, activity: CheckCircle2, audit: Pencil };
   return (
@@ -245,42 +276,135 @@ export function Chatter({ related }) {
   );
 }
 
-export function NewOrderItems({ items, setItems }) {
+const ROLE_WORD = { admin: 'Admin', manager: 'Manager', sales: 'Sales' };
+
+// Tells people in the CRM that something needs doing. It changes no billing or stock data.
+export function NotifyButton({ label = 'Notify', message = '', link, sm, kind, icon = 'BellRing', disabled }) {
+  const { db, me, notifyPeople, toast } = useStore();
+  const [open, setOpen] = useState(false);
+  const [to, setTo] = useState([]);
+  const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  const people = db.users.filter((u) => u.active && u.id !== me.id);
+  const start = () => {
+    const admins = people.filter((u) => u.role === 'admin');
+    setTo((admins.length ? admins : people.filter((u) => u.role === 'manager')).map((u) => u.id));
+    setText(message);
+    setError('');
+    setOpen(true);
+  };
+  const send = () => {
+    if (!to.length) { setError('Choose at least one person.'); return; }
+    if (!text.trim()) { setError('Write a message.'); return; }
+    notifyPeople(to, text.trim(), link);
+    toast(`${to.length === 1 ? people.find((u) => u.id === to[0])?.name : `${to.length} people`} notified in the CRM`);
+    setOpen(false);
+  };
+  return (
+    <>
+      <Btn sm={sm} kind={kind} icon={icon} disabled={disabled} onClick={start}>{label}</Btn>
+      {open && <Modal title={label} onClose={() => setOpen(false)} footer={<><Btn onClick={() => setOpen(false)}>Cancel</Btn><Btn kind="primary" icon="Send" onClick={send}>Send notification</Btn></>}>
+        <div className="stack">
+          <div className="field"><label className="label" htmlFor="ntf-text">Message</label><textarea id="ntf-text" className="input" rows={5} value={text} onChange={(e) => { setText(e.target.value); setError(''); }} /></div>
+          <div className="field">
+            <div className="label">Send to</div>
+            <div className="stack-s" style={{ maxHeight: 220, overflowY: 'auto' }}>
+              {people.map((u) => <label key={u.id} className="row" style={{ gap: 8 }}><input type="checkbox" checked={to.includes(u.id)} onChange={(e) => { setTo(e.target.checked ? [...to, u.id] : to.filter((x) => x !== u.id)); setError(''); }} /><span className="grow">{u.name}</span><span className="small muted">{ROLE_WORD[u.role] || u.role}</span></label>)}
+            </div>
+          </div>
+          {error && <div className="error-text">{error}</div>}
+        </div>
+      </Modal>}
+    </>
+  );
+}
+export const OpsNote = ({ children }) => {
+  const { opsReadOnly } = useStore();
+  return opsReadOnly ? <p className="notice" style={{ marginBottom: 14 }}>{children}</p> : null;
+};
+
+// Choose how much of each line to act on: ship, invoice, receive or credit.
+export function QtyLines({ rows, values, onChange, doneLabel, inputLabel }) {
+  const allOn = rows.every((r) => Number(values[r.key]) === r.max);
+  return (
+    <div className="stack-s">
+      <div className="row between"><span className="label">Items</span><Btn sm kind="ghost" onClick={() => onChange(Object.fromEntries(rows.map((r) => [r.key, allOn ? 0 : r.max])))}>{allOn ? 'Clear all' : 'Select all'}</Btn></div>
+      <div className="tb-wrap">
+        <table className="table"><thead><tr><th>Item</th><th className="r">Total</th><th className="r">{doneLabel}</th><th className="r">{inputLabel}</th></tr></thead>
+          <tbody>{rows.map((r) => <tr key={r.key}>
+            <td>{r.name}</td><td className="r num">{r.ordered}</td><td className="r num">{r.done}</td>
+            <td className="r"><input className="input" style={{ width: 80, textAlign: 'right', marginInlineStart: 'auto' }} type="number" min="0" max={r.max} disabled={!r.max} aria-label={`${inputLabel}: ${r.name}`} value={values[r.key] ?? 0} onChange={(e) => onChange({ ...values, [r.key]: Math.min(r.max, Math.max(0, Number(e.target.value) || 0)) })} /></td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+export function NewOrderItems({ items, setItems, purchase, customer, rate = 1 }) {
   const { db } = useStore();
+  const listOff = purchase ? 0 : priceListDiscount(db.settings, customer?.priceList);
   const change = (i, patch) => setItems(items.map((x, n) => (n === i ? { ...x, ...patch } : x)));
   return (
     <div>
       <div className="label" style={{ marginBottom: 6 }}>Line items <span className="req">*</span></div>
+      <div className={`line-item li-head small muted${purchase ? ' no-disc' : ''}`} aria-hidden="true"><span>Product</span><span>Qty</span><span>{purchase ? 'Unit cost' : 'Price'}</span>{!purchase && <span>Off %</span>}<span className="right">Amount</span><span /></div>
+      {!!listOff && <div className="small muted" style={{ marginBottom: 6 }}>{customer.name} is on the {customer.priceList} price list, so new lines start at {listOff}% off.</div>}
       {items.map((it, i) => (
-        <div className="line-item" key={it.key}>
-          <select className="select" aria-label="Product" value={it.productId} onChange={(e) => { const p = db.products.find((x) => x.id === e.target.value); change(i, { productId: e.target.value, name: p?.name || '', price: p?.price || 0 }); }}>
+        <React.Fragment key={it.key}><div className={`line-item${purchase ? ' no-disc' : ''}`}>
+          <select className="select" aria-label="Product" value={it.productId} onChange={(e) => { const p = db.products.find((x) => x.id === e.target.value); change(i, purchase ? { productId: e.target.value, name: p?.name || '', price: p?.cost || 0 } : { productId: e.target.value, name: p?.name || '', price: round2((p?.price || 0) * (rate || 1)), discount: listOff }); }}>
             <option value="">Select a product…</option>
-            {db.products.filter((p) => p.active).map((p) => <option key={p.id} value={p.id}>{p.name}{p.tracked ? ` (${p.stock} in stock)` : ''}</option>)}
+            {db.products.filter((p) => p.active && (!purchase || p.tracked)).map((p) => <option key={p.id} value={p.id}>{p.name}{p.tracked ? ` (${p.stock} in stock)` : ''}</option>)}
           </select>
           <input className="input" aria-label="Quantity" type="number" min="1" value={it.qty} onChange={(e) => change(i, { qty: Math.max(1, Number(e.target.value) || 1) })} />
           <input className="input li-price" aria-label="Unit price" type="number" min="0" value={it.price} onChange={(e) => change(i, { price: Math.max(0, Number(e.target.value) || 0) })} />
-          <span className="num right li-total strong">{(it.qty * it.price).toLocaleString('en-US')}</span>
+          {!purchase && <input className="input li-disc" aria-label="Discount percent" type="number" min="0" max="100" value={it.discount || 0} onChange={(e) => change(i, { discount: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} />}
+          <span className="num right li-total strong">{lineTotal(it).toLocaleString(getLocale())}</span>
           <Btn sm kind="ghost" icon="Trash2" aria-label="Remove line" disabled={items.length === 1} onClick={() => setItems(items.filter((_, n) => n !== i))} />
         </div>
+        {(() => {
+          const p = db.products.find((x) => x.id === it.productId);
+          if (purchase || !p?.tracked || it.qty <= p.stock) return null;
+          const short = it.qty - p.stock;
+          return <div className="stock-warn" role="status">{p.stock ? `Only ${p.stock} in stock, ${short} short.` : 'Out of stock.'} {db.settings.allowBackorder ? 'This will be a backorder, so check the delivery date before you promise it.' : 'Backorders are off, so check stock before you promise this.'}</div>;
+        })()}</React.Fragment>
       ))}
       <Btn sm icon="Plus" onClick={() => setItems([...items, newLine()])}>Add line</Btn>
     </div>
   );
 }
+// Extra columns in a CSV download, so accountants see both the document's currency and the main one.
+export const docColumns = (amount) => [
+  { k: 'docCurrency', label: 'Document currency', exportOnly: true, value: (r) => docCur(r) },
+  { k: 'docAmount', label: 'Document amount', exportOnly: true, value: (r) => round2(inDoc(r, amount(r))) },
+  { k: 'mainCurrency', label: 'Main currency', exportOnly: true, value: () => mainCurrency() },
+];
 export const newLine = () => ({ key: uid('li'), productId: '', name: '', qty: 1, price: 0 });
 export const cleanItems = (items) => items.filter((x) => x.productId).map(({ key, ...x }) => x);
 
 export const RecordQuickCreate = ({ kind, onClose, defaults = {} }) => {
-  const { db, me, can, create, toast, role } = useStore();
+  const { db, me, can, create, toast, role, formFields, labelOf } = useStore();
+  const warned = useRef('');
   const owner = role !== 'sales';
   const ownerId = owner ? me.id : me.id;
   const cfg = {
     deal: { title: 'New opportunity', fields: dealFields(null, { owner }), entity: 'deals', init: { title: '', value: 10000, closeDate: addDays(30), source: 'Website', ownerId, tags: [], notes: '', stage: db.stages[0].id, status: 'open', probability: db.stages[0].prob, priority: 0, ...defaults } },
     lead: { title: 'New lead', fields: leadFields({ owner }), entity: 'leads', init: { status: 'New', source: 'Website', score: 50, ownerId, expected: 5000, ...defaults } },
     contact: { title: 'New contact', fields: contactFields({ owner }), entity: 'contacts', init: { status: 'Cold', ownerId, tags: [], lastActivity: new Date().toISOString(), ...defaults } },
-    company: { title: 'New customer', fields: companyFields({ owner }), entity: 'companies', init: { status: 'Prospect', ownerId, tags: [], paymentTerms: '30 days', priceList: 'Standard', ...defaults } },
+    company: { title: 'New customer', fields: companyFields({ owner }), entity: 'companies', init: { status: 'Prospect', ownerId, tags: [], paymentTerms: db.settings.defaultTerms || '30 days', priceList: 'Standard', ...defaults } },
   }[kind];
-  return <RecordModal title={cfg.title} fields={cfg.fields} initial={cfg.init} onClose={onClose} size="lg" saveLabel="Create" onSave={(v) => { create(cfg.entity, v); toast(`${cfg.title.replace('New ', '')} created`); }} />;
+  // Warns once about a likely duplicate. Saving again means they meant it.
+  const check = (v) => {
+    if (kind === 'deal') return rateOf(v.currency || db.companies.find((c) => c.id === v.companyId)?.currency) ? {} : { currency: NO_RATE };
+    const dup = findDuplicate(db, kind, v);
+    if (!dup) return {};
+    const key = dup.id + (v.email || v.name || v.first);
+    if (warned.current === key) return {};
+    warned.current = key;
+    const name = dup.name || `${dup.first} ${dup.last}`;
+    return { [v.email && dup.email?.toLowerCase() === v.email.toLowerCase() ? 'email' : kind === 'contact' ? 'first' : 'name']: `${name} may already exist. Press Create again to add this anyway.` };
+  };
+  return <RecordModal title={cfg.title} fields={formFields(kind, cfg.fields)} initial={cfg.init} check={check} onClose={onClose} size="lg" saveLabel="Create" onSave={(v) => { create(cfg.entity, kind === 'deal' ? dealFromForm(v, null, db.companies.find((c) => c.id === v.companyId)) : v); toast(`${cfg.title.replace('New ', '')} created`); }} />;
 };
 export const relatedOf = (type, r) => ({ type, id: r.id, label: type === 'deal' ? r.title : type === 'contact' ? `${r.first} ${r.last}` : r.name, ownerId: r.ownerId });
 export { RECORD_ENTITY };

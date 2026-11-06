@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { REQUIRED_OPTIONS } from '../engine';
 import { TITLES, useStore } from '../store';
 import { Btn, Card, Confirm, Icon, RecordModal } from '../ui';
 import { MENU_WORDS, PICKLISTS, PICKLIST_BY_KEY, cleanOption } from '../picklists';
@@ -101,7 +102,7 @@ const stageError = (stages, id, name, prob) => {
 };
 
 function StageRow({ stage, index, last, uses }) {
-  const { db, updateStage, moveStage, removeStage, toast } = useStore();
+  const { db, updateStage, moveStage, removeStage, setStageRequired, toast } = useStore();
   const won = stage.id === 'won';
   const [name, setName] = useState(stage.name);
   const [prob, setProb] = useState(stage.prob);
@@ -134,12 +135,16 @@ function StageRow({ stage, index, last, uses }) {
       {removing && (uses
         ? <RecordModal size="sm" title={`Remove ${stage.name}?`} saveLabel="Move deals and remove" fields={[{ k: 'toId', label: `Move its ${uses} ${uses === 1 ? 'deal' : 'deals'} to`, type: 'select', req: true, full: true, options: others.map((s) => ({ value: s.id, label: s.name })) }]} onClose={() => setRemoving(false)} onSave={(v) => { removeStage(stage.id, v.toId); toast(`${stage.name} removed`); }} />
         : <Confirm title={`Remove ${stage.name}?`} text="No deals are on this stage." confirmLabel="Remove" onClose={() => setRemoving(false)} onConfirm={() => { removeStage(stage.id, others[0].id); toast(`${stage.name} removed`); }} />)}
+      <div className="stage-req" role="group" aria-label={`What ${stage.name} requires`}>
+        <span className="small muted">To enter this stage, require:</span>
+        {REQUIRED_OPTIONS.map(([k, label]) => <label key={k} className="check small"><input type="checkbox" checked={(stage.required || []).includes(k)} onChange={() => setStageRequired(stage.id, (stage.required || []).includes(k) ? stage.required.filter((x) => x !== k) : [...(stage.required || []), k])} />{label}</label>)}
+      </div>
     </div>
   );
 }
 
 export function DealStages() {
-  const { db, addStage, toast } = useStore();
+  const { db, addStage, updateSettings, toast } = useStore();
   const [name, setName] = useState('');
   const [prob, setProb] = useState(50);
   const [error, setError] = useState('');
@@ -154,6 +159,7 @@ export function DealStages() {
   };
   return (
     <Card title="Deal stages" sub="The steps a deal moves through, for everyone in this company. New deals start on the first stage, and Won is always last.">
+      <div className="field" style={{ maxWidth: 300, marginBottom: 12 }}><label className="label" htmlFor="stale-days">Flag a deal as stuck after this many days in one stage</label><input id="stale-days" className="input" type="number" min="1" value={db.settings.staleDays ?? 14} onChange={(e) => updateSettings({ staleDays: Math.max(1, Number(e.target.value) || 1) })} /></div>
       <form className="row wrap" style={{ alignItems: 'flex-start', marginBottom: 12 }} onSubmit={add} noValidate>
         <input className={`input grow ${error ? 'err' : ''}`} style={{ minWidth: 140, flexBasis: 140 }} aria-label="New stage name" placeholder="New stage" value={name} onChange={(e) => { setName(e.target.value); setError(''); }} />
         <span className="row" style={{ gap: 4 }}><input className="input" style={{ width: 72 }} type="number" min="0" max="100" aria-label="New stage probability" value={prob} onChange={(e) => { setProb(e.target.value); setError(''); }} />%</span>

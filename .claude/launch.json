@@ -1,6 +1,7 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "crm", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 5173 }
+    { "name": "crm", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 5173 },
+    { "name": "crm-built", "runtimeExecutable": "npx", "runtimeArgs": ["vite", "preview", "--port", "4173"], "port": 4173 }
   ]
 }

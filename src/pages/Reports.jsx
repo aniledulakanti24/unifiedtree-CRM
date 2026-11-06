@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { DateRange, inRange, useDateRange } from '../dateRange';
 import { Link } from 'react-router-dom';
 import { useStore } from '../store';
 import { STAGES } from '../seed';
@@ -8,7 +9,7 @@ import { downloadCsv, fmtShort, groupBy, lastMonths, money, moneyK, monthKey, mo
 
 const stageName = (id) => STAGES.find((s) => s.id === id)?.name;
 
-export function Forecast() {
+export function MonthlyForecast({ embedded }) {
   const { db, me, sec, scopeOf, t, scope, companyName, userName } = useStore();
   const open = useMemo(() => scope(db.deals, 'forecast').filter((d) => d.status === 'open'), [db.deals, me.id]);
   const months = nextMonths(5);
@@ -19,7 +20,7 @@ export function Forecast() {
   const overdue = open.filter((d) => monthKey(d.closeDate) < months[0]);
   return (
     <div>
-      <PageHead title={t('forecast')} sub="Open opportunities by expected closing month" />
+      {!embedded && <PageHead title={t('forecast')} sub="Open opportunities by expected closing month" />}
       {sec('forecast', 'kpis') && <div className="g3" style={{ marginBottom: 14 }}>
         <Kpi label="Expected, next 5 months" value={moneyK(sum(data, (d) => d.Expected))} icon="TrendingUp" />
         <Kpi label="Weighted forecast" value={moneyK(sum(data, (d) => d.Weighted))} note="Expected revenue × probability" icon="Scale" />
@@ -61,7 +62,8 @@ export function PipelineAnalysis() {
   const [measure, setMeasure] = useState('value');
   const [chart, setChart] = useState('bar');
   const [status, setStatus] = useState('all');
-  const base = useMemo(() => scope(db.deals, 'analysis'), [db.deals, me.id]);
+  const [range, setRange] = useDateRange();
+  const base = useMemo(() => scope(db.deals, 'analysis').filter((d) => inRange(d.closeDate, range)), [db.deals, me.id, range]);
   const deals = status === 'all' ? base : base.filter((d) => d.status === status);
   const keyFn = group === 'owner' ? (d) => userName(d.ownerId)
     : group === 'team' ? (d) => db.teams.find((t) => t.id === db.users.find((u) => u.id === d.ownerId)?.teamId)?.name || 'No team'
@@ -78,6 +80,7 @@ export function PipelineAnalysis() {
   return (
     <div>
       <PageHead title={t('analysis')} >
+        <DateRange value={range} onChange={setRange} allowAll />
         {can('data', 'export') && <Btn icon="Download" onClick={() => downloadCsv('pipeline-analysis', [[GROUPS[group][0], 'Count', 'Expected', 'Weighted', 'Won', 'Lost'], ...rows.map((r) => [r.label, r.count, r.value, r.weighted, r.won, r.lost])])}>Export</Btn>}
       </PageHead>
       {sec('analysis', 'kpis') && <div className="g4" style={{ marginBottom: 14 }}>
@@ -117,7 +120,8 @@ export function PipelineAnalysis() {
 
 export function LeadsAnalysis() {
   const { db, me, can, sec, scopeOf, t, scope, userName } = useStore();
-  const leads = useMemo(() => scope(db.leads, 'leadsReport'), [db.leads, me.id]);
+  const [range, setRange] = useDateRange();
+  const leads = useMemo(() => scope(db.leads, 'leadsReport').filter((l) => inRange(l.createdAt, range)), [db.leads, me.id, range]);
   const [group, setGroup] = useState('source');
   const key = { source: (l) => l.source, status: (l) => l.status, owner: (l) => userName(l.ownerId), country: (l) => l.country || 'Unknown' }[group];
   const rows = Object.entries(groupBy(leads, key)).map(([label, list]) => ({
@@ -128,6 +132,7 @@ export function LeadsAnalysis() {
   return (
     <div>
       <PageHead title={t('leadsReport')} />
+        <DateRange value={range} onChange={setRange} allowAll />
       {sec('leadsReport', 'kpis') && <div className="g4" style={{ marginBottom: 14 }}>
         <Kpi label="Leads" value={num(leads.length)} icon="Magnet" />
         <Kpi label="Converted" value={num(conv)} icon="Repeat" />

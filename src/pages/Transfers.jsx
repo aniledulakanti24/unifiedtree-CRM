@@ -55,7 +55,7 @@ export default function Transfers() {
         <Kpi label="Approved" value={rows.filter((t) => t.status === 'Approved').length} icon="CheckCircle2" />
         <Kpi label="Rejected" value={rows.filter((t) => t.status === 'Rejected').length} icon="XCircle" />
       </div>}
-      <DataTable rows={rows} exportName="transfers" initialSort={{ k: 'requestedAt', dir: 'desc' }}
+      <DataTable rows={rows} exportName="transfers" dateOf={(x) => x.requestedAt} initialSort={{ k: 'requestedAt', dir: 'desc' }}
         statusTabs={{ options: ['Pending', 'Approved', 'Rejected'], get: (t) => t.status }}
         filters={[{ k: 'type', label: 'Type', get: (t) => t.recordType, options: Object.entries(TYPE_LABEL).map(([value, label]) => ({ value, label })) }]}
         columns={[
